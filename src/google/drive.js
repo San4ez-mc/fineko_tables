@@ -57,7 +57,7 @@ async function createFolder(drive, folderName, parentFolderId) {
 }
 
 async function getOrCreateUserReportsFolder(drive, userData, options = {}) {
-    const folderName = buildUserFolderName(userData);
+    const folderName = sanitizeFolderName(options.folderNameOverride || buildUserFolderName(userData));
     const parentFolderId =
         options.parentFolderId ||
         process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID ||

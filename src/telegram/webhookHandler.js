@@ -89,13 +89,18 @@ async function fetchPayloadFromSource(telegramId) {
 }
 
 function formatSuccessMessage(result) {
-    const lines = [
-        "Готово! Таблиці створені.",
-        `Папка: ${result.folder_url}`,
-        `Cashflow: ${result.cashflow_url}`,
-        `P&L: ${result.pl_url}`,
-        `Validation: ${result.validation.valid ? "OK" : "FAILED"}`
-    ];
+    const lines = ["Готово! Таблиці створені.", `Папка: ${result.folder_url}`];
+
+    if (Array.isArray(result.generated_files) && result.generated_files.length > 0) {
+        result.generated_files.forEach((file) => {
+            lines.push(`${file.title}: ${file.spreadsheet_url}`);
+        });
+    } else {
+        lines.push(`Cashflow: ${result.cashflow_url}`);
+        lines.push(`P&L: ${result.pl_url}`);
+    }
+
+    lines.push(`Validation: ${result.validation.valid ? "OK" : "FAILED"}`);
 
     if (result.share_warnings?.length) {
         lines.push("Увага: автоматичний доступ по лінку не вдалося повністю налаштувати.");

@@ -3,127 +3,129 @@
   "telegram_username": "demo_client",
   "business_type": "services",
   "process_model": {
-    "sales_channels": [
-      "instagram",
-      "telegram",
-      "referrals"
-    ],
-    "average_check": 12000,
-    "monthly_clients": 18,
-    "team_size": 4,
-    "notes": "Тестовий приклад для побудови фінансових таблиць"
+    "notes": "Універсальний приклад ТЗ для будь-яких таблиць"
+  },
+  "report_spec": {
+    "folder_name": "@demo_client - Financial Reports",
+    "spreadsheets": [
+      {
+        "title": "Cashflow",
+        "sheets": [
+          {
+            "title": "План",
+            "columns": [
+              "Період",
+              "Стаття",
+              "Група",
+              "Тип руху",
+              "Частота",
+              "План сума",
+              "Коментар"
+            ],
+            "required_fields": [
+              "Період",
+              "Стаття",
+              "План сума"
+            ],
+            "rows": [
+              {
+                "Період": "2026-05",
+                "Стаття": "Оплата консультацій",
+                "Група": "Доходи",
+                "Тип руху": "in",
+                "Частота": "monthly",
+                "План сума": 120000,
+                "Коментар": "Основний дохід"
+              },
+              {
+                "Період": "2026-05",
+                "Стаття": "Маркетинг",
+                "Група": "Операційні витрати",
+                "Тип руху": "out",
+                "Частота": "monthly",
+                "План сума": 15000,
+                "Коментар": "Реклама"
+              }
+            ]
+          },
+          {
+            "title": "Звіт",
+            "headers": [
+              "Метрика",
+              "Значення"
+            ],
+            "rows": [
+              [
+                "Total In",
+                "=SUMIF(План!D:D,\"in\",План!F:F)"
+              ],
+              [
+                "Total Out",
+                "=SUMIF(План!D:D,\"out\",План!F:F)"
+              ],
+              [
+                "Net",
+                "=B2-B3"
+              ]
+            ],
+            "formulas": {
+              "B4": "=B2-B3"
+            }
+          }
+        ]
+      },
+      {
+        "title": "P&L",
+        "sheets": [
+          {
+            "name": "P&L",
+            "колонки": [
+              "Секція",
+              "Стаття",
+              "Сума"
+            ],
+            "обовязкові_поля": [
+              "Секція",
+              "Стаття"
+            ],
+            "дані": [
+              {
+                "Секція": "Revenue",
+                "Стаття": "Виручка",
+                "Сума": 120000
+              },
+              {
+                "Секція": "Opex",
+                "Стаття": "Маркетинг",
+                "Сума": 15000
+              }
+            ]
+          }
+        ]
+      }
+    ]
   },
   "financial_reports_model": {
     "business_type": "services",
     "cashflow_items": {
-      "income": [
-        {
-          "name": "Оплата консультацій",
-          "flow_type": "in",
-          "frequency": "monthly",
-          "is_regular": true,
-          "amount": 120000,
-          "comment": "Середній плановий дохід"
-        },
-        {
-          "name": "Разові аудити",
-          "flow_type": "in",
-          "frequency": "ad_hoc",
-          "is_regular": false,
-          "amount": 30000,
-          "comment": "Нерегулярні додаткові продажі"
-        }
-      ],
-      "cogs": [
-        {
-          "name": "Підрядники",
-          "flow_type": "out",
-          "frequency": "monthly",
-          "is_regular": true,
-          "amount": 25000,
-          "comment": "Виплати зовнішнім спеціалістам"
-        }
-      ],
-      "team": [
-        {
-          "name": "Зарплата менеджера",
-          "flow_type": "out",
-          "frequency": "monthly",
-          "is_regular": true,
-          "amount": 35000,
-          "comment": "Фіксована ставка"
-        }
-      ],
-      "operations": [
-        {
-          "name": "CRM та сервіси",
-          "flow_type": "out",
-          "frequency": "monthly",
-          "is_regular": true,
-          "amount": 5000,
-          "comment": "Підписки на робочі інструменти"
-        },
-        {
-          "name": "Маркетинг",
-          "flow_type": "out",
-          "frequency": "monthly",
-          "is_regular": true,
-          "amount": 15000,
-          "comment": "Трафік і просування"
-        }
-      ],
-      "taxes": [
-        {
-          "name": "Єдиний податок",
-          "flow_type": "out",
-          "frequency": "quarterly",
-          "is_regular": true,
-          "amount": 12000,
-          "comment": "Планова сума податків"
-        }
-      ]
+      "income": [],
+      "cogs": [],
+      "team": [],
+      "operations": [],
+      "taxes": []
     },
     "pl_structure": {
-      "revenue": [
-        {
-          "name": "Виручка від консультацій"
-        },
-        {
-          "name": "Виручка від аудитів"
-        }
-      ],
-      "cogs": [
-        {
-          "name": "Оплата підрядників"
-        }
-      ],
+      "revenue": [],
+      "cogs": [],
       "gross_profit": "revenue - cogs",
-      "opex": [
-        {
-          "name": "Фонд оплати праці"
-        },
-        {
-          "name": "CRM та сервіси"
-        },
-        {
-          "name": "Маркетинг"
-        }
-      ],
+      "opex": [],
       "operating_profit": "gross_profit - opex",
-      "owner_payout": [
-        {
-          "name": "Виплата власнику"
-        }
-      ],
+      "owner_payout": [],
       "pre_tax_profit": "operating_profit - owner_payout",
-      "taxes": [
-        {
-          "name": "Податки"
-        }
-      ],
+      "taxes": [],
       "net_profit": "pre_tax_profit - taxes"
     },
-    "items_count": 9,
+    "items_count": 0,
     "status": "complete"
   }
 }
