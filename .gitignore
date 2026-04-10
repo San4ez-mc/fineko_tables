@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Service account keys
+*-service-account*.json
+ultra-surfer-492920-a5-cd1642cd832a.json
