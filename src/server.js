@@ -1,4 +1,5 @@
 const express = require("express");
+const path = require("path");
 const { handleTelegramUpdate } = require("./telegram/webhookHandler");
 const { setWebhook } = require("./telegram/bot");
 
@@ -17,6 +18,16 @@ function verifyWebhookSecret(req) {
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, service: "google-reports-telegram-webhook" });
+});
+
+app.get("/brand-photo", (_req, res) => {
+  const filePath = path.join(
+    __dirname,
+    "..",
+    "Subject_stepping_through_a_glo_Nano_Banana_Pro_48534.jpg"
+  );
+
+  return res.sendFile(filePath);
 });
 
 app.post("/telegram/webhook", async (req, res) => {

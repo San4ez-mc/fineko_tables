@@ -1,5 +1,5 @@
 const { buildReports } = require("../google/reportBuilder");
-const { sendMessage } = require("./bot");
+const { sendMessage, sendPhoto } = require("./bot");
 
 function extractMessage(update) {
   if (update.message) {
@@ -96,6 +96,23 @@ function formatErrorMessage(error) {
   ].join("\n");
 }
 
+function buildWelcomeMessage() {
+  return [
+    "Привіт! Це бот Олександра Мацука для автоматичного створення фінансових таблиць.",
+    "Бот допомагає згенерувати Cashflow і P&L у Google Sheets, створює папку на Google Drive, відкриває доступ і надсилає готові посилання.",
+    "Надішли /build_reports, щоб запустити генерацію таблиць."
+  ].join("\n\n");
+}
+
+function getBrandPhotoUrl() {
+  const appBaseUrl = process.env.APP_BASE_URL;
+  if (!appBaseUrl) {
+    return "";
+  }
+
+  return `${appBaseUrl.replace(/\/$/, "")}/brand-photo`;
+}
+
 async function handleBuildReports(message) {
   const telegramId = message.from?.id;
   if (!telegramId) {
@@ -121,10 +138,15 @@ async function handleTelegramUpdate(update) {
   }
 
   if (command === "/start") {
-    await sendMessage(
-      message.chat.id,
-      "Привіт! Надішли /build_reports щоб згенерувати Cashflow і P&L таблиці."
-    );
+    const welcomeMessage = buildWelcomeMessage();
+    const brandPhotoUrl = getBrandPhotoUrl();
+
+    if (brandPhotoUrl) {
+      await sendPhoto(message.chat.id, brandPhotoUrl, welcomeMessage);
+    } else {
+      await sendMessage(message.chat.id, welcomeMessage);
+    }
+
     return { handled: true, command };
   }
 

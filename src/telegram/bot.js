@@ -35,6 +35,15 @@ async function sendMessage(chatId, text) {
   });
 }
 
+async function sendPhoto(chatId, photoUrl, caption) {
+  return telegramRequest("sendPhoto", {
+    chat_id: chatId,
+    photo: photoUrl,
+    caption,
+    disable_notification: false
+  });
+}
+
 async function setWebhook(webhookUrl, secretToken) {
   const body = {
     url: webhookUrl,
@@ -50,5 +59,6 @@ async function setWebhook(webhookUrl, secretToken) {
 
 module.exports = {
   sendMessage,
+  sendPhoto,
   setWebhook
 };

@@ -1,0 +1,129 @@
+{
+  "telegram_id": 123456789,
+  "telegram_username": "demo_client",
+  "business_type": "services",
+  "process_model": {
+    "sales_channels": [
+      "instagram",
+      "telegram",
+      "referrals"
+    ],
+    "average_check": 12000,
+    "monthly_clients": 18,
+    "team_size": 4,
+    "notes": "Тестовий приклад для побудови фінансових таблиць"
+  },
+  "financial_reports_model": {
+    "business_type": "services",
+    "cashflow_items": {
+      "income": [
+        {
+          "name": "Оплата консультацій",
+          "flow_type": "in",
+          "frequency": "monthly",
+          "is_regular": true,
+          "amount": 120000,
+          "comment": "Середній плановий дохід"
+        },
+        {
+          "name": "Разові аудити",
+          "flow_type": "in",
+          "frequency": "ad_hoc",
+          "is_regular": false,
+          "amount": 30000,
+          "comment": "Нерегулярні додаткові продажі"
+        }
+      ],
+      "cogs": [
+        {
+          "name": "Підрядники",
+          "flow_type": "out",
+          "frequency": "monthly",
+          "is_regular": true,
+          "amount": 25000,
+          "comment": "Виплати зовнішнім спеціалістам"
+        }
+      ],
+      "team": [
+        {
+          "name": "Зарплата менеджера",
+          "flow_type": "out",
+          "frequency": "monthly",
+          "is_regular": true,
+          "amount": 35000,
+          "comment": "Фіксована ставка"
+        }
+      ],
+      "operations": [
+        {
+          "name": "CRM та сервіси",
+          "flow_type": "out",
+          "frequency": "monthly",
+          "is_regular": true,
+          "amount": 5000,
+          "comment": "Підписки на робочі інструменти"
+        },
+        {
+          "name": "Маркетинг",
+          "flow_type": "out",
+          "frequency": "monthly",
+          "is_regular": true,
+          "amount": 15000,
+          "comment": "Трафік і просування"
+        }
+      ],
+      "taxes": [
+        {
+          "name": "Єдиний податок",
+          "flow_type": "out",
+          "frequency": "quarterly",
+          "is_regular": true,
+          "amount": 12000,
+          "comment": "Планова сума податків"
+        }
+      ]
+    },
+    "pl_structure": {
+      "revenue": [
+        {
+          "name": "Виручка від консультацій"
+        },
+        {
+          "name": "Виручка від аудитів"
+        }
+      ],
+      "cogs": [
+        {
+          "name": "Оплата підрядників"
+        }
+      ],
+      "gross_profit": "revenue - cogs",
+      "opex": [
+        {
+          "name": "Фонд оплати праці"
+        },
+        {
+          "name": "CRM та сервіси"
+        },
+        {
+          "name": "Маркетинг"
+        }
+      ],
+      "operating_profit": "gross_profit - opex",
+      "owner_payout": [
+        {
+          "name": "Виплата власнику"
+        }
+      ],
+      "pre_tax_profit": "operating_profit - owner_payout",
+      "taxes": [
+        {
+          "name": "Податки"
+        }
+      ],
+      "net_profit": "pre_tax_profit - taxes"
+    },
+    "items_count": 9,
+    "status": "complete"
+  }
+}
