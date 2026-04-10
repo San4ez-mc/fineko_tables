@@ -1,0 +1,13 @@
+{
+  "name": "google-sheets-ai-agent",
+  "version": "0.1.0",
+  "description": "Google Drive/Sheets report builder for Cashflow and P&L",
+  "main": "src/google/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node -e \"console.log('Use src/google/reportBuilder.js from your bot flow')\""
+  },
+  "dependencies": {
+    "googleapis": "^148.0.0"
+  }
+}

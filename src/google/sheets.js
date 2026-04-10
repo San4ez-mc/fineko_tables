@@ -1,0 +1,93 @@
+async function createSpreadsheetInFolder(sheets, drive, folderId, title) {
+  const created = await sheets.spreadsheets.create({
+    requestBody: {
+      properties: { title }
+    },
+    fields: "spreadsheetId,spreadsheetUrl"
+  });
+
+  const spreadsheetId = created.data.spreadsheetId;
+
+  if (folderId) {
+    await drive.files.update({
+      fileId: spreadsheetId,
+      addParents: folderId,
+      removeParents: "root",
+      fields: "id,parents",
+      supportsAllDrives: true
+    });
+  }
+
+  return created.data;
+}
+
+async function getSpreadsheet(sheets, spreadsheetId) {
+  const response = await sheets.spreadsheets.get({
+    spreadsheetId
+  });
+
+  return response.data;
+}
+
+function getSheetByTitle(spreadsheet, title) {
+  return spreadsheet.sheets?.find((sheet) => sheet.properties?.title === title) || null;
+}
+
+async function addSheetIfMissing(sheets, spreadsheetId, title) {
+  const spreadsheet = await getSpreadsheet(sheets, spreadsheetId);
+  const existing = getSheetByTitle(spreadsheet, title);
+
+  if (existing) {
+    return existing.properties;
+  }
+
+  const response = await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          addSheet: {
+            properties: { title }
+          }
+        }
+      ]
+    }
+  });
+
+  return response.data.replies?.[0]?.addSheet?.properties;
+}
+
+async function writeValues(sheets, spreadsheetId, range, values) {
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values }
+  });
+}
+
+async function writeHeaders(sheets, spreadsheetId, sheetTitle, headers) {
+  await writeValues(sheets, spreadsheetId, `${sheetTitle}!A1`, [headers]);
+}
+
+async function applySheetFormatting(sheets, spreadsheetId, requests) {
+  if (!requests || requests.length === 0) {
+    return;
+  }
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests
+    }
+  });
+}
+
+module.exports = {
+  createSpreadsheetInFolder,
+  addSheetIfMissing,
+  writeValues,
+  writeHeaders,
+  applySheetFormatting,
+  getSpreadsheet
+};
