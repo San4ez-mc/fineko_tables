@@ -58,7 +58,10 @@ async function createFolder(drive, folderName, parentFolderId) {
 
 async function getOrCreateUserReportsFolder(drive, userData, options = {}) {
     const folderName = buildUserFolderName(userData);
-    const parentFolderId = options.parentFolderId || "root";
+    const parentFolderId =
+        options.parentFolderId ||
+        process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID ||
+        "root";
 
     const existing = await findFolderByName(drive, folderName, parentFolderId);
     if (existing) {

@@ -106,8 +106,10 @@ function formatSuccessMessage(result) {
 
 function formatErrorMessage(error) {
     const details = error.message.includes("The caller does not have permission")
-        ? "Google не дозволив операцію. Найчастіше це означає, що service account не має ролі Editor на батьківську папку або в цій папці/домені заборонено змінювати sharing."
-        : error.message;
+        ? "Google не дозволив операцію. Найчастіше це означає, що service account не має ролі Editor/Content manager на цільову папку або в цьому домені заборонено змінювати sharing."
+        : error.message.includes("Drive storage quota has been exceeded")
+            ? "Перевищено квоту Drive для service account. Потрібно створювати файли у Shared Drive (або через акаунт з реальною квотою), а не в особистому root service account."
+            : error.message;
 
     return [
         "Не вдалося згенерувати таблиці.",
