@@ -89,20 +89,30 @@ async function fetchPayloadFromSource(telegramId) {
 }
 
 function formatSuccessMessage(result) {
-    return [
+    const lines = [
         "Готово! Таблиці створені.",
         `Папка: ${result.folder_url}`,
         `Cashflow: ${result.cashflow_url}`,
         `P&L: ${result.pl_url}`,
         `Validation: ${result.validation.valid ? "OK" : "FAILED"}`
-    ].join("\n");
+    ];
+
+    if (result.share_warnings?.length) {
+        lines.push("Увага: автоматичний доступ по лінку не вдалося повністю налаштувати.");
+    }
+
+    return lines.join("\n");
 }
 
 function formatErrorMessage(error) {
+    const details = error.message.includes("The caller does not have permission")
+        ? "Google не дозволив операцію. Найчастіше це означає, що service account не має ролі Editor на батьківську папку або в цій папці/домені заборонено змінювати sharing."
+        : error.message;
+
     return [
         "Не вдалося згенерувати таблиці.",
         "Спробуй ще раз через 1-2 хвилини.",
-        `Технічна причина: ${error.message}`
+        `Технічна причина: ${details}`
     ].join("\n");
 }
 
