@@ -1,131 +1,132 @@
 {
-  "telegram_id": 123456789,
-  "telegram_username": "demo_client",
-  "business_type": "services",
-  "process_model": {
-    "notes": "Універсальний приклад ТЗ для будь-яких таблиць"
-  },
-  "report_spec": {
-    "folder_name": "@demo_client - Financial Reports",
-    "spreadsheets": [
-      {
-        "title": "Cashflow",
-        "sheets": [
-          {
-            "title": "План",
-            "columns": [
-              "Період",
-              "Стаття",
-              "Група",
-              "Тип руху",
-              "Частота",
-              "План сума",
-              "Коментар"
-            ],
-            "required_fields": [
-              "Період",
-              "Стаття",
-              "План сума"
-            ],
-            "rows": [
-              {
-                "Період": "2026-05",
-                "Стаття": "Оплата консультацій",
-                "Група": "Доходи",
-                "Тип руху": "in",
-                "Частота": "monthly",
-                "План сума": 120000,
-                "Коментар": "Основний дохід"
-              },
-              {
-                "Період": "2026-05",
-                "Стаття": "Маркетинг",
-                "Група": "Операційні витрати",
-                "Тип руху": "out",
-                "Частота": "monthly",
-                "План сума": 15000,
-                "Коментар": "Реклама"
-              }
-            ]
-          },
-          {
-            "title": "Звіт",
-            "headers": [
-              "Метрика",
-              "Значення"
-            ],
-            "rows": [
-              [
-                "Total In",
-                "=SUMIF(План!D:D,\"in\",План!F:F)"
-              ],
-              [
-                "Total Out",
-                "=SUMIF(План!D:D,\"out\",План!F:F)"
-              ],
-              [
-                "Net",
-                "=B2-B3"
-              ]
-            ],
-            "formulas": {
-              "B4": "=B2-B3"
-            }
-          }
-        ]
-      },
-      {
-        "title": "P&L",
-        "sheets": [
-          {
-            "name": "P&L",
-            "колонки": [
-              "Секція",
-              "Стаття",
-              "Сума"
-            ],
-            "обовязкові_поля": [
-              "Секція",
-              "Стаття"
-            ],
-            "дані": [
-              {
-                "Секція": "Revenue",
-                "Стаття": "Виручка",
-                "Сума": 120000
-              },
-              {
-                "Секція": "Opex",
-                "Стаття": "Маркетинг",
-                "Сума": 15000
-              }
-            ]
-          }
-        ]
-      }
-    ]
-  },
-  "financial_reports_model": {
+    "telegram_id": 123456789,
+    "telegram_username": "demo_client",
     "business_type": "services",
-    "cashflow_items": {
-      "income": [],
-      "cogs": [],
-      "team": [],
-      "operations": [],
-      "taxes": []
+    "process_model": {
+        "notes": "Універсальний приклад ТЗ для будь-яких таблиць"
     },
-    "pl_structure": {
-      "revenue": [],
-      "cogs": [],
-      "gross_profit": "revenue - cogs",
-      "opex": [],
-      "operating_profit": "gross_profit - opex",
-      "owner_payout": [],
-      "pre_tax_profit": "operating_profit - owner_payout",
-      "taxes": [],
-      "net_profit": "pre_tax_profit - taxes"
+    "tz_text": "table: Операційний план\nsheet: План\ncolumns: Період, Стаття, Сума\nrequired: Період, Стаття\nrow: Період=2026-06; Стаття=Оренда; Сума=12000\nrow: Період=2026-06; Стаття=Маркетинг; Сума=15000\nformula: D2=SUM(C:C)",
+    "report_spec": {
+        "folder_name": "@demo_client - Financial Reports",
+        "spreadsheets": [
+            {
+                "title": "Cashflow",
+                "sheets": [
+                    {
+                        "title": "План",
+                        "columns": [
+                            "Період",
+                            "Стаття",
+                            "Група",
+                            "Тип руху",
+                            "Частота",
+                            "План сума",
+                            "Коментар"
+                        ],
+                        "required_fields": [
+                            "Період",
+                            "Стаття",
+                            "План сума"
+                        ],
+                        "rows": [
+                            {
+                                "Період": "2026-05",
+                                "Стаття": "Оплата консультацій",
+                                "Група": "Доходи",
+                                "Тип руху": "in",
+                                "Частота": "monthly",
+                                "План сума": 120000,
+                                "Коментар": "Основний дохід"
+                            },
+                            {
+                                "Період": "2026-05",
+                                "Стаття": "Маркетинг",
+                                "Група": "Операційні витрати",
+                                "Тип руху": "out",
+                                "Частота": "monthly",
+                                "План сума": 15000,
+                                "Коментар": "Реклама"
+                            }
+                        ]
+                    },
+                    {
+                        "title": "Звіт",
+                        "headers": [
+                            "Метрика",
+                            "Значення"
+                        ],
+                        "rows": [
+                            [
+                                "Total In",
+                                "=SUMIF(План!D:D,\"in\",План!F:F)"
+                            ],
+                            [
+                                "Total Out",
+                                "=SUMIF(План!D:D,\"out\",План!F:F)"
+                            ],
+                            [
+                                "Net",
+                                "=B2-B3"
+                            ]
+                        ],
+                        "formulas": {
+                            "B4": "=B2-B3"
+                        }
+                    }
+                ]
+            },
+            {
+                "title": "P&L",
+                "sheets": [
+                    {
+                        "name": "P&L",
+                        "колонки": [
+                            "Секція",
+                            "Стаття",
+                            "Сума"
+                        ],
+                        "обовязкові_поля": [
+                            "Секція",
+                            "Стаття"
+                        ],
+                        "дані": [
+                            {
+                                "Секція": "Revenue",
+                                "Стаття": "Виручка",
+                                "Сума": 120000
+                            },
+                            {
+                                "Секція": "Opex",
+                                "Стаття": "Маркетинг",
+                                "Сума": 15000
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
     },
-    "items_count": 0,
-    "status": "complete"
-  }
+    "financial_reports_model": {
+        "business_type": "services",
+        "cashflow_items": {
+            "income": [],
+            "cogs": [],
+            "team": [],
+            "operations": [],
+            "taxes": []
+        },
+        "pl_structure": {
+            "revenue": [],
+            "cogs": [],
+            "gross_profit": "revenue - cogs",
+            "opex": [],
+            "operating_profit": "gross_profit - opex",
+            "owner_payout": [],
+            "pre_tax_profit": "operating_profit - owner_payout",
+            "taxes": [],
+            "net_profit": "pre_tax_profit - taxes"
+        },
+        "items_count": 0,
+        "status": "complete"
+    }
 }

@@ -29,6 +29,15 @@ const REPORT_SPEC_ALIASES = [
     "tables_spec"
 ];
 
+const TEXT_TZ_ALIASES = [
+    "tz_text",
+    "report_tz_text",
+    "technical_task_text",
+    "prompt",
+    "description",
+    "instructions_text"
+];
+
 const SPREADSHEETS_ALIASES = [
     "spreadsheets",
     "tables",
@@ -114,7 +123,137 @@ function slugify(value) {
 }
 
 function hasUniversalSpec(payload = {}) {
-    return Boolean(firstDefined(payload, REPORT_SPEC_ALIASES));
+    return Boolean(firstDefined(payload, REPORT_SPEC_ALIASES) || firstDefined(payload, TEXT_TZ_ALIASES));
+}
+
+function parseList(value) {
+    return String(value || "")
+        .split(/[,;|]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+function ensureSpreadsheet(spec, fallbackTitle = "Report") {
+    if (!spec.spreadsheets || spec.spreadsheets.length === 0) {
+        spec.spreadsheets = [{ title: fallbackTitle, sheets: [] }];
+    }
+
+    return spec.spreadsheets[spec.spreadsheets.length - 1];
+}
+
+function ensureSheet(spreadsheet, fallbackTitle = "Sheet 1") {
+    if (!spreadsheet.sheets || spreadsheet.sheets.length === 0) {
+        spreadsheet.sheets = [{ title: fallbackTitle, headers: [], rows: [], formulas: [], requiredFields: [] }];
+    }
+
+    return spreadsheet.sheets[spreadsheet.sheets.length - 1];
+}
+
+function parseRowExpression(text) {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+        try {
+            return JSON.parse(trimmed);
+        } catch {
+            return null;
+        }
+    }
+
+    const pairTokens = trimmed.split(/[;|]/).map((part) => part.trim()).filter(Boolean);
+    const rowObject = {};
+
+    for (const token of pairTokens) {
+        const separatorIndex = token.indexOf("=") >= 0 ? token.indexOf("=") : token.indexOf(":");
+        if (separatorIndex === -1) {
+            continue;
+        }
+
+        const key = token.slice(0, separatorIndex).trim();
+        const value = token.slice(separatorIndex + 1).trim();
+        if (key) {
+            rowObject[key] = value;
+        }
+    }
+
+    return Object.keys(rowObject).length > 0 ? rowObject : null;
+}
+
+function parseTextTzToReportSpec(text, payload) {
+    const normalized = {
+        folderName: payload?.telegram_username ? `@${payload.telegram_username} - Financial Reports` : undefined,
+        spreadsheets: []
+    };
+
+    const lines = String(text || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    if (lines.length === 0) {
+        return normalized;
+    }
+
+    for (const line of lines) {
+        let match = line.match(/^(folder|папка|назва\s*папки|название\s*папки)\s*[:\-]\s*(.+)$/i);
+        if (match) {
+            normalized.folderName = match[2].trim();
+            continue;
+        }
+
+        match = line.match(/^(table|spreadsheet|таблиця|таблица|файл)\s*[:\-]\s*(.+)$/i);
+        if (match) {
+            normalized.spreadsheets.push({ title: match[2].trim(), sheets: [] });
+            continue;
+        }
+
+        match = line.match(/^(sheet|tab|вкладка|лист|аркуш)\s*[:\-]\s*(.+)$/i);
+        if (match) {
+            const spreadsheet = ensureSpreadsheet(normalized);
+            spreadsheet.sheets.push({ title: match[2].trim(), headers: [], rows: [], formulas: [], requiredFields: [] });
+            continue;
+        }
+
+        match = line.match(/^(columns|headers|колонки|стовпці|поля)\s*[:\-]\s*(.+)$/i);
+        if (match) {
+            const spreadsheet = ensureSpreadsheet(normalized);
+            const sheet = ensureSheet(spreadsheet);
+            sheet.headers = parseList(match[2]);
+            continue;
+        }
+
+        match = line.match(/^(required|required_fields|required_columns|обовязкові|обязательные)\s*[:\-]\s*(.+)$/i);
+        if (match) {
+            const spreadsheet = ensureSpreadsheet(normalized);
+            const sheet = ensureSheet(spreadsheet);
+            sheet.requiredFields = parseList(match[2]);
+            continue;
+        }
+
+        match = line.match(/^(row|рядок|строка|data|дані|данные)\s*[:\-]\s*(.+)$/i);
+        if (match) {
+            const parsedRow = parseRowExpression(match[2]);
+            if (parsedRow) {
+                const spreadsheet = ensureSpreadsheet(normalized);
+                const sheet = ensureSheet(spreadsheet);
+                sheet.rows.push(parsedRow);
+            }
+            continue;
+        }
+
+        match = line.match(/^(formula|формула)\s*[:\-]\s*([A-Za-z]+\d+)\s*[=:]\s*(.+)$/i);
+        if (match) {
+            const spreadsheet = ensureSpreadsheet(normalized);
+            const sheet = ensureSheet(spreadsheet);
+            sheet.formulas.push({ range: match[2], formula: match[3] });
+            continue;
+        }
+    }
+
+    return normalized;
 }
 
 function normalizeFormulas(raw) {
@@ -224,9 +363,11 @@ function normalizeSpreadsheetSpec(rawSpreadsheet = {}, index = 0) {
 }
 
 function normalizeReportSpec(payload) {
+    const rawTextTz = firstDefined(payload, TEXT_TZ_ALIASES);
+    const parsedTextSpec = rawTextTz ? parseTextTzToReportSpec(rawTextTz, payload) : null;
     const rawSpec = firstDefined(payload, REPORT_SPEC_ALIASES) || {};
-    const folderName = firstDefined(rawSpec, FOLDER_NAME_ALIASES);
-    const rawSpreadsheets = firstDefined(rawSpec, SPREADSHEETS_ALIASES) || [];
+    const folderName = firstDefined(rawSpec, FOLDER_NAME_ALIASES) || parsedTextSpec?.folderName;
+    const rawSpreadsheets = firstDefined(rawSpec, SPREADSHEETS_ALIASES) || parsedTextSpec?.spreadsheets || [];
 
     return {
         folderName,
@@ -317,7 +458,7 @@ async function buildFromUniversalSpec(payload, options, clients) {
     const spec = normalizeReportSpec(payload);
 
     if (!spec.spreadsheets || spec.spreadsheets.length === 0) {
-        throw new Error("Universal report spec is empty. Add report_spec.spreadsheets with sheets, columns, and rows.");
+        throw new Error("Universal report spec is empty. Add report_spec.spreadsheets or provide tz_text with table/sheet/columns/rows.");
     }
 
     const folder = await getOrCreateUserReportsFolder(drive, payload, {
