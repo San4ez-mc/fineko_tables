@@ -2,6 +2,8 @@ const { buildReports } = require("../google/reportBuilder");
 const { answerCallbackQuery, sendMessage, sendPhoto } = require("./bot");
 
 const BUILD_REPORTS_ACTION = "build_reports";
+const CLEAR_DRAFT_ACTION = "clear_draft";
+const DRAFTS = new Map();
 
 function extractMessage(update) {
     if (update.message) {
@@ -29,6 +31,138 @@ function extractAction(update) {
     }
 
     return "";
+}
+
+function getChatId(message) {
+    return message?.chat?.id;
+}
+
+function getTelegramIdentity(message) {
+    return {
+        telegram_id: message?.from?.id,
+        telegram_username: message?.from?.username || null
+    };
+}
+
+function getDraft(chatId) {
+    return DRAFTS.get(chatId) || null;
+}
+
+function setDraft(chatId, draft) {
+    DRAFTS.set(chatId, {
+        ...draft,
+        updatedAt: new Date().toISOString()
+    });
+}
+
+function clearDraft(chatId) {
+    DRAFTS.delete(chatId);
+}
+
+function tryParseJson(text) {
+    const trimmed = String(text || "").trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        return null;
+    }
+}
+
+function mergeTzText(previous, incoming) {
+    const trimmedIncoming = String(incoming || "").trim();
+    if (!trimmedIncoming) {
+        return previous || "";
+    }
+
+    const replacePrefix = trimmedIncoming.match(/^(replace|заміни|перезапиши)\s*[:\-]\s*/i);
+    if (replacePrefix) {
+        return trimmedIncoming.slice(replacePrefix[0].length).trim();
+    }
+
+    if (!previous) {
+        return trimmedIncoming;
+    }
+
+    return `${previous}\n${trimmedIncoming}`;
+}
+
+function normalizeIncomingPayload(rawPayload, message) {
+    if (!rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) {
+        return null;
+    }
+
+    const identity = getTelegramIdentity(message);
+
+    return {
+        ...rawPayload,
+        telegram_id: rawPayload.telegram_id || identity.telegram_id,
+        telegram_username: rawPayload.telegram_username ?? identity.telegram_username
+    };
+}
+
+async function captureUserTzMessage(message) {
+    const chatId = getChatId(message);
+    const text = String(message?.text || "").trim();
+    if (!chatId || !text) {
+        return false;
+    }
+
+    if (text.startsWith("/")) {
+        return false;
+    }
+
+    const parsedJson = tryParseJson(text);
+    const draft = getDraft(chatId) || {};
+
+    if (parsedJson) {
+        const normalizedPayload = normalizeIncomingPayload(parsedJson, message);
+        if (!normalizedPayload) {
+            await sendMessage(chatId, "Не зміг розпізнати JSON. Перевір формат і спробуй ще раз.");
+            return true;
+        }
+
+        setDraft(chatId, {
+            ...draft,
+            mode: "json",
+            payload: normalizedPayload
+        });
+
+        await sendMessage(
+            chatId,
+            "Отримав JSON ТЗ і зберіг як поточну чернетку. Натисни кнопку \"Згенерувати таблиці\", щоб застосувати зміни.",
+            { reply_markup: buildStartKeyboard() }
+        );
+
+        return true;
+    }
+
+    const mergedText = mergeTzText(draft.tzText || "", text);
+    const identity = getTelegramIdentity(message);
+    const payload = {
+        telegram_id: identity.telegram_id,
+        telegram_username: identity.telegram_username,
+        tz_text: mergedText,
+        process_model: {}
+    };
+
+    setDraft(chatId, {
+        ...draft,
+        mode: "text",
+        tzText: mergedText,
+        payload
+    });
+
+    await sendMessage(
+        chatId,
+        "Отримав правки до ТЗ і оновив чернетку. Натисни \"Згенерувати таблиці\", щоб перебудувати таблиці з новими даними.",
+        { reply_markup: buildStartKeyboard() }
+    );
+
+    return true;
 }
 
 function buildDefaultPayload(message) {
@@ -126,8 +260,9 @@ function formatErrorMessage(error) {
 function buildWelcomeMessage() {
     return [
         "Привіт! Це бот Олександра Мацука для автоматичного створення фінансових таблиць.",
-        "Бот допомагає згенерувати Cashflow і P&L у Google Sheets, створює папку на Google Drive, відкриває доступ і надсилає готові посилання.",
-        "Натисни кнопку нижче, щоб запустити генерацію таблиць."
+        "Надішли мені або JSON ТЗ, або текстовий опис (простими словами), і я зберу з цього таблиці.",
+        "Можеш надсилати додаткові повідомлення з правками, я оновлю чернетку ТЗ.",
+        "Потім натисни кнопку \"Згенерувати таблиці\"."
     ].join("\n\n");
 }
 
@@ -138,6 +273,10 @@ function buildStartKeyboard() {
                 {
                     text: "Згенерувати таблиці",
                     callback_data: BUILD_REPORTS_ACTION
+                },
+                {
+                    text: "Очистити чернетку",
+                    callback_data: CLEAR_DRAFT_ACTION
                 }
             ]
         ]
@@ -159,6 +298,12 @@ async function handleBuildReports(message) {
         throw new Error("Missing Telegram user id");
     }
 
+    const chatId = getChatId(message);
+    const draft = chatId ? getDraft(chatId) : null;
+    if (draft?.payload) {
+        return buildReports(draft.payload);
+    }
+
     const payload =
         (await fetchPayloadFromSource(telegramId)) ||
         buildDefaultPayload(message);
@@ -172,13 +317,43 @@ async function handleTelegramUpdate(update) {
         return { handled: false, reason: "No message context" };
     }
 
+    const chatId = getChatId(message);
+
     const command = extractCommand(message.text || "");
     const action = extractAction(update);
     const shouldStart = command === "/start";
     const shouldBuild = ["/build_reports", "/tables"].includes(command) || action === BUILD_REPORTS_ACTION;
+    const shouldClearDraft = action === CLEAR_DRAFT_ACTION || command === "/clear";
 
-    if (!shouldStart && !shouldBuild) {
-        return { handled: false, reason: "Unknown command" };
+    if (!shouldStart && !shouldBuild && !shouldClearDraft) {
+        const captured = await captureUserTzMessage(message);
+        if (captured) {
+            return { handled: true, command: "tz_update" };
+        }
+
+        return {
+            handled: false,
+            reason: "Unknown command",
+            help: "Send JSON TZ or text description, then press Generate"
+        };
+    }
+
+    if (shouldClearDraft) {
+        if (chatId) {
+            clearDraft(chatId);
+        }
+
+        if (update.callback_query?.id) {
+            await answerCallbackQuery(update.callback_query.id, "Чернетку очищено");
+        }
+
+        await sendMessage(
+            message.chat.id,
+            "Чернетку ТЗ очищено. Надішли новий JSON або текстовий опис.",
+            { reply_markup: buildStartKeyboard() }
+        );
+
+        return { handled: true, command: command || action };
     }
 
     if (shouldStart) {
