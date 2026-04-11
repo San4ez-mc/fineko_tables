@@ -1,8 +1,7 @@
 const { buildReports } = require("../google/reportBuilder");
-const { answerCallbackQuery, sendMessage, sendPhoto } = require("./bot");
+const { sendMessage, sendPhoto } = require("./bot");
 
 const BUILD_REPORTS_ACTION = "build_reports";
-const CLEAR_DRAFT_ACTION = "clear_draft";
 const DRAFTS = new Map();
 
 function extractMessage(update) {
@@ -131,13 +130,7 @@ async function captureUserTzMessage(message) {
             payload: normalizedPayload
         });
 
-        await sendMessage(
-            chatId,
-            "Отримав JSON ТЗ і зберіг як поточну чернетку. Натисни кнопку \"Згенерувати таблиці\", щоб застосувати зміни.",
-            { reply_markup: buildStartKeyboard() }
-        );
-
-        return true;
+        return { captured: true, payload: normalizedPayload, mode: "json" };
     }
 
     const mergedText = mergeTzText(draft.tzText || "", text);
@@ -156,13 +149,7 @@ async function captureUserTzMessage(message) {
         payload
     });
 
-    await sendMessage(
-        chatId,
-        "Отримав правки до ТЗ і оновив чернетку. Натисни \"Згенерувати таблиці\", щоб перебудувати таблиці з новими даними.",
-        { reply_markup: buildStartKeyboard() }
-    );
-
-    return true;
+    return { captured: true, payload, mode: "text" };
 }
 
 function buildDefaultPayload(message) {
@@ -260,27 +247,10 @@ function formatErrorMessage(error) {
 function buildWelcomeMessage() {
     return [
         "Привіт! Це бот Олександра Мацука для автоматичного створення фінансових таблиць.",
-        "Надішли мені або JSON ТЗ, або текстовий опис (простими словами), і я зберу з цього таблиці.",
+        "Надішли мені або JSON ТЗ, або текстовий опис (простими словами), і я одразу згенерую таблиці.",
         "Можеш надсилати додаткові повідомлення з правками, я оновлю чернетку ТЗ.",
-        "Потім натисни кнопку \"Згенерувати таблиці\"."
+        "Для очищення чернетки використай команду /clear."
     ].join("\n\n");
-}
-
-function buildStartKeyboard() {
-    return {
-        inline_keyboard: [
-            [
-                {
-                    text: "Згенерувати таблиці",
-                    callback_data: BUILD_REPORTS_ACTION
-                },
-                {
-                    text: "Очистити чернетку",
-                    callback_data: CLEAR_DRAFT_ACTION
-                }
-            ]
-        ]
-    };
 }
 
 function getBrandPhotoUrl() {
@@ -311,6 +281,19 @@ async function handleBuildReports(message) {
     return buildReports(payload);
 }
 
+async function runBuildAndReply(message, commandLabel) {
+    await sendMessage(message.chat.id, "Починаю побудову таблиць. Це може зайняти до хвилини...");
+
+    try {
+        const result = await handleBuildReports(message);
+        await sendMessage(message.chat.id, formatSuccessMessage(result));
+        return { handled: true, command: commandLabel, result };
+    } catch (error) {
+        await sendMessage(message.chat.id, formatErrorMessage(error));
+        return { handled: true, command: commandLabel, error: error.message };
+    }
+}
+
 async function handleTelegramUpdate(update) {
     const message = extractMessage(update);
     if (!message || !message.chat) {
@@ -323,18 +306,22 @@ async function handleTelegramUpdate(update) {
     const action = extractAction(update);
     const shouldStart = command === "/start";
     const shouldBuild = ["/build_reports", "/tables"].includes(command) || action === BUILD_REPORTS_ACTION;
-    const shouldClearDraft = action === CLEAR_DRAFT_ACTION || command === "/clear";
+    const shouldClearDraft = command === "/clear";
 
     if (!shouldStart && !shouldBuild && !shouldClearDraft) {
         const captured = await captureUserTzMessage(message);
-        if (captured) {
-            return { handled: true, command: "tz_update" };
+        if (captured?.captured) {
+            const ack = captured.mode === "json"
+                ? "Отримав JSON ТЗ, запускаю генерацію."
+                : "Отримав текст ТЗ/правки, запускаю генерацію.";
+            await sendMessage(message.chat.id, ack);
+            return runBuildAndReply(message, "tz_update_auto_build");
         }
 
         return {
             handled: false,
             reason: "Unknown command",
-            help: "Send JSON TZ or text description, then press Generate"
+            help: "Send JSON TZ or text description"
         };
     }
 
@@ -343,14 +330,9 @@ async function handleTelegramUpdate(update) {
             clearDraft(chatId);
         }
 
-        if (update.callback_query?.id) {
-            await answerCallbackQuery(update.callback_query.id, "Чернетку очищено");
-        }
-
         await sendMessage(
             message.chat.id,
-            "Чернетку ТЗ очищено. Надішли новий JSON або текстовий опис.",
-            { reply_markup: buildStartKeyboard() }
+            "Чернетку ТЗ очищено. Надішли новий JSON або текстовий опис."
         );
 
         return { handled: true, command: command || action };
@@ -359,31 +341,17 @@ async function handleTelegramUpdate(update) {
     if (shouldStart) {
         const welcomeMessage = buildWelcomeMessage();
         const brandPhotoUrl = getBrandPhotoUrl();
-        const replyMarkup = { reply_markup: buildStartKeyboard() };
 
         if (brandPhotoUrl) {
-            await sendPhoto(message.chat.id, brandPhotoUrl, welcomeMessage, replyMarkup);
+            await sendPhoto(message.chat.id, brandPhotoUrl, welcomeMessage);
         } else {
-            await sendMessage(message.chat.id, welcomeMessage, replyMarkup);
+            await sendMessage(message.chat.id, welcomeMessage);
         }
 
         return { handled: true, command: "/start" };
     }
 
-    if (update.callback_query?.id) {
-        await answerCallbackQuery(update.callback_query.id, "Запускаю генерацію...");
-    }
-
-    await sendMessage(message.chat.id, "Починаю побудову таблиць. Це може зайняти до хвилини...");
-
-    try {
-        const result = await handleBuildReports(message);
-        await sendMessage(message.chat.id, formatSuccessMessage(result));
-        return { handled: true, command: command || action, result };
-    } catch (error) {
-        await sendMessage(message.chat.id, formatErrorMessage(error));
-        return { handled: true, command: command || action, error: error.message };
-    }
+    return runBuildAndReply(message, command || action || "manual_build");
 }
 
 module.exports = {
