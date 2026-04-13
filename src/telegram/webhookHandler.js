@@ -1,6 +1,6 @@
 const { buildReports } = require("../google/reportBuilder");
 const { sendMessage, sendPhoto } = require("./bot");
-const { parseTzMessage, analyzeArchitecture } = require("./tzParser");
+const { parseTzFromTelegramMessage, analyzeArchitecture } = require("./tzParser");
 
 const BUILD_REPORTS_ACTION = "build_reports";
 const DRAFTS = new Map();
@@ -281,7 +281,7 @@ async function captureUserTzMessage(message) {
         return { captured: true, payload: normalizedPayload, mode: "json" };
     }
 
-    const tzParsed = parseTzMessage(text);
+    const tzParsed = parseTzFromTelegramMessage(message);
     if (tzParsed.detected) {
         if (!tzParsed.parsed) {
             await sendMessage(

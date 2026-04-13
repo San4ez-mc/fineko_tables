@@ -137,6 +137,79 @@ function parseTzMessage(text) {
     }
 }
 
+function parseTzLikeText(text) {
+    const source = String(text || "").trim();
+    if (!source) {
+        return {
+            detected: false,
+            parsed: false,
+            reason: "empty_text"
+        };
+    }
+
+    const looksLikeTz = /(business_name\s*:|report_type\s*:|inflows\s*:|outflows\s*:)/i.test(source);
+    if (!looksLikeTz) {
+        return {
+            detected: false,
+            parsed: false,
+            reason: "not_tz_like"
+        };
+    }
+
+    try {
+        const tz = parseTzBlock(source);
+        return {
+            detected: true,
+            parsed: true,
+            tz,
+            language: "plain"
+        };
+    } catch (error) {
+        return {
+            detected: true,
+            parsed: false,
+            reason: error.message,
+            language: "plain"
+        };
+    }
+}
+
+function parseTzFromTelegramMessage(message) {
+    const text = String(message?.text || "");
+    const entities = Array.isArray(message?.entities) ? message.entities : [];
+    const preEntity = entities.find((entity) => entity?.type === "pre");
+
+    if (preEntity && Number.isInteger(preEntity.offset) && Number.isInteger(preEntity.length)) {
+        const start = preEntity.offset;
+        const end = preEntity.offset + preEntity.length;
+        const content = text.slice(start, end).trim();
+
+        try {
+            const tz = parseTzBlock(content);
+            return {
+                detected: true,
+                parsed: true,
+                tz,
+                language: String(preEntity.language || "").toLowerCase() || "pre"
+            };
+        } catch (error) {
+            return {
+                detected: true,
+                parsed: false,
+                reason: error.message,
+                language: String(preEntity.language || "").toLowerCase() || "pre"
+            };
+        }
+    }
+
+    const byCodeBlock = parseTzMessage(text);
+    if (byCodeBlock.detected) {
+        return byCodeBlock;
+    }
+
+    return parseTzLikeText(text);
+}
+
 function toNumber(value) {
     const num = Number(value);
     return Number.isFinite(num) ? num : 0;
@@ -205,5 +278,6 @@ function analyzeArchitecture(tz) {
 
 module.exports = {
     parseTzMessage,
+    parseTzFromTelegramMessage,
     analyzeArchitecture
 };
