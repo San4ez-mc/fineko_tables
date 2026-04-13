@@ -39,6 +39,26 @@ async function findFolderByName(drive, folderName, parentFolderId) {
     return response.data.files?.[0] || null;
 }
 
+async function findSpreadsheetByName(drive, fileName, parentFolderId) {
+    const effectiveParentFolderId = parentFolderId || "root";
+    const query = [
+        "mimeType='application/vnd.google-apps.spreadsheet'",
+        "trashed=false",
+        `name='${String(fileName || "").replace(/'/g, "\\'")}'`,
+        `'${effectiveParentFolderId}' in parents`
+    ].join(" and ");
+
+    const response = await drive.files.list({
+        q: query,
+        fields: "files(id,name,webViewLink)",
+        pageSize: 1,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true
+    });
+
+    return response.data.files?.[0] || null;
+}
+
 async function createFolder(drive, folderName, parentFolderId) {
     const effectiveParentFolderId = parentFolderId || "root";
     const fileMetadata = {
@@ -72,6 +92,22 @@ async function getOrCreateUserReportsFolder(drive, userData, options = {}) {
     return { ...created, created: true };
 }
 
+async function getOrCreateFolderByName(drive, folderName, options = {}) {
+    const parentFolderId =
+        options.parentFolderId ||
+        process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID ||
+        "root";
+
+    const safeName = sanitizeFolderName(folderName);
+    const existing = await findFolderByName(drive, safeName, parentFolderId);
+    if (existing) {
+        return { ...existing, created: false };
+    }
+
+    const created = await createFolder(drive, safeName, parentFolderId);
+    return { ...created, created: true };
+}
+
 async function setSharingToAnyoneWithLink(drive, fileId, role = "writer") {
     await drive.permissions.create({
         fileId,
@@ -94,6 +130,8 @@ function buildSpreadsheetUrl(spreadsheetId) {
 module.exports = {
     buildUserFolderName,
     getOrCreateUserReportsFolder,
+    getOrCreateFolderByName,
+    findSpreadsheetByName,
     setSharingToAnyoneWithLink,
     buildFolderUrl,
     buildSpreadsheetUrl

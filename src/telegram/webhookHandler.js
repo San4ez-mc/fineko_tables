@@ -1,5 +1,6 @@
 const { buildReports } = require("../google/reportBuilder");
 const { sendMessage, sendPhoto } = require("./bot");
+const { parseTzMessage, analyzeArchitecture } = require("./tzParser");
 
 const BUILD_REPORTS_ACTION = "build_reports";
 const DRAFTS = new Map();
@@ -71,6 +72,13 @@ function tryParseJson(text) {
     }
 }
 
+function splitAnswers(text) {
+    return String(text || "")
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^\d+[\).]\s*/, "").trim())
+        .filter(Boolean);
+}
+
 function mergeTzText(previous, incoming) {
     const trimmedIncoming = String(incoming || "").trim();
     if (!trimmedIncoming) {
@@ -103,6 +111,146 @@ function normalizeIncomingPayload(rawPayload, message) {
     };
 }
 
+function buildArchitectureMessage(analysis) {
+    const lines = [
+        "Проаналізував ТЗ. Ось що я бачу:",
+        "",
+        `Загальна кількість операцій: ${analysis.totalOps}/міс`
+    ];
+
+    if (analysis.noAccessPeople.length > 0) {
+        lines.push(
+            `Без доступу до Sheets: ${analysis.noAccessPeople.map((item) => `${item.name} (${item.ops} оп/міс)`).join(", ")}`
+        );
+    } else {
+        lines.push("Без доступу до Sheets: немає");
+    }
+
+    lines.push("");
+    lines.push("Архітектура:");
+    lines.push(`-> Надходження: режим ${analysis.inflowsMode}`);
+    lines.push(`-> Витрати: режим ${analysis.outflowsMode}`);
+    lines.push("");
+    lines.push("Перед тим як будувати, поставлю кілька уточнень.");
+
+    return lines.join("\n");
+}
+
+function buildQuestionQueue(tz, analysis) {
+    const questions = [
+        {
+            key: "google_email",
+            text: "1) Вкажи Google email, на який створюємо/шаримо файл."
+        },
+        {
+            key: "business_name",
+            text: `2) Підтверди назву компанії для папки/файлу (зараз: ${tz.business_name || "Business"}).`
+        },
+        {
+            key: "language",
+            text: "3) Мова таблиці: українська чи англійська?"
+        }
+    ];
+
+    for (const person of analysis.noAccessPeople) {
+        questions.push({
+            key: `no_access_method_${person.name}`,
+            text: `${person.name} не має доступу до Sheets. Як зручно: Google Form чи ти вносиш дані за нього?`
+        });
+    }
+
+    for (const item of analysis.highOpsItems) {
+        questions.push({
+            key: `high_ops_${item.article}`,
+            text: `${item.article} - ${item.ops} операцій/міс. ${item.responsible} вносить кожну транзакцію чи пакетом раз на тиждень?`
+        });
+    }
+
+    if (String(tz.report_type || "").toLowerCase() === "cashflow") {
+        questions.push({
+            key: "include_payment_calendar",
+            text: "Додати аркуш Платіжного календаря? (так/ні)"
+        });
+    }
+
+    questions.push(
+        {
+            key: "bank_accounts",
+            text: "Є кілька банківських рахунків? Якщо так, зводити в один залишок чи вести окремо?"
+        },
+        {
+            key: "counterparties",
+            text: "Потрібен облік по контрагентах? (так/ні)"
+        },
+        {
+            key: "file_conflict_strategy",
+            text: "Якщо файл з такою назвою вже існує: перезаписати чи створити новий з датою?"
+        }
+    );
+
+    return questions;
+}
+
+function nextQuestionBatch(queue = [], size = 3) {
+    return queue.slice(0, size);
+}
+
+function normalizeAnswerValue(value, fallback) {
+    const text = String(value || "").trim();
+    return text || fallback || "";
+}
+
+function applyAnswers(draft, text) {
+    const answers = splitAnswers(text);
+    const batch = Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [];
+    const resolved = { ...(draft.answers || {}) };
+
+    if (batch.length === 1) {
+        resolved[batch[0].key] = normalizeAnswerValue(text);
+    } else {
+        batch.forEach((question, index) => {
+            resolved[question.key] = normalizeAnswerValue(answers[index], answers[answers.length - 1] || "");
+        });
+    }
+
+    const remainingQueue = Array.isArray(draft.questionsQueue)
+        ? draft.questionsQueue.slice(batch.length)
+        : [];
+
+    return {
+        answers: resolved,
+        questionsQueue: remainingQueue,
+        pendingQuestions: nextQuestionBatch(remainingQueue)
+    };
+}
+
+function asYesNo(value) {
+    const text = String(value || "").trim().toLowerCase();
+    return ["так", "yes", "y", "true", "1"].includes(text);
+}
+
+function buildPayloadFromTzDraft(draft, message) {
+    const identity = getTelegramIdentity(message);
+    const answers = draft.answers || {};
+    const tz = draft.tz || {};
+
+    return {
+        telegram_id: identity.telegram_id,
+        telegram_username: identity.telegram_username,
+        business_name: answers.business_name || tz.business_name || "Business",
+        business_type: tz.business_type || "unknown",
+        report_type: String(tz.report_type || "cashflow").toLowerCase(),
+        tz_struct: tz,
+        architecture: draft.architecture || {},
+        answers,
+        language: answers.language || "українська",
+        include_payment_calendar: asYesNo(answers.include_payment_calendar),
+        needs_counterparties: asYesNo(answers.counterparties),
+        file_conflict_strategy: /перезапис/i.test(String(answers.file_conflict_strategy || "")) ? "overwrite" : "new_dated",
+        process_model: {}
+    };
+}
+
 async function captureUserTzMessage(message) {
     const chatId = getChatId(message);
     const text = String(message?.text || "").trim();
@@ -131,6 +279,40 @@ async function captureUserTzMessage(message) {
         });
 
         return { captured: true, payload: normalizedPayload, mode: "json" };
+    }
+
+    const tzParsed = parseTzMessage(text);
+    if (tzParsed.detected) {
+        if (!tzParsed.parsed) {
+            await sendMessage(
+                chatId,
+                "Бачу code-блок, але не зміг розпарсити ТЗ. Надішли ще раз у форматі ```tz ...```, перевір відступи і ключі."
+            );
+
+            return { captured: true, mode: "tz_invalid" };
+        }
+
+        const analysis = analyzeArchitecture(tzParsed.tz);
+        const questionsQueue = buildQuestionQueue(tzParsed.tz, analysis);
+        const pendingQuestions = nextQuestionBatch(questionsQueue);
+
+        setDraft(chatId, {
+            ...draft,
+            mode: "tz_code_block",
+            status: "clarifying",
+            tz: tzParsed.tz,
+            architecture: analysis,
+            questionsQueue,
+            pendingQuestions,
+            answers: {}
+        });
+
+        return {
+            captured: true,
+            mode: "tz_code_block",
+            analysis,
+            pendingQuestions
+        };
     }
 
     const mergedText = mergeTzText(draft.tzText || "", text);
@@ -210,6 +392,38 @@ async function fetchPayloadFromSource(telegramId) {
 }
 
 function formatSuccessMessage(result) {
+    if (result.mode === "cashflow_v23") {
+        const lines = [
+            "✅ Таблиця Cashflow готова",
+            "",
+            `📁 Папка: ${result.system_folder_name || "Фінансова система"}`,
+            `🔗 ${result.folder_url}`
+        ];
+
+        const cashflowFile = (result.generated_files || []).find((item) => item.type === "cashflow");
+        if (cashflowFile) {
+            lines.push("");
+            lines.push(`📊 ${cashflowFile.title}`);
+            lines.push(`🔗 ${cashflowFile.spreadsheet_url}`);
+        }
+
+        lines.push("");
+        lines.push("Що побудовано:");
+        for (const item of result.built_summary || []) {
+            lines.push(`✓ ${item}`);
+        }
+
+        lines.push("");
+        lines.push("Наступні кроки:");
+        lines.push("1. Відкрий файл і перевір, що статті відображаються правильно");
+        lines.push("2. Внеси тестову операцію і перевір зведений аркуш");
+        lines.push("3. Якщо є люди без доступу до Sheets, передай їм інструкцію по вводу");
+        lines.push("");
+        lines.push("➡️ Наступний урок: 2.4 — Платіжний календар");
+
+        return lines.join("\n");
+    }
+
     const lines = ["Готово! Таблиці створені.", `Папка: ${result.folder_url}`];
 
     if (Array.isArray(result.generated_files) && result.generated_files.length > 0) {
@@ -247,8 +461,8 @@ function formatErrorMessage(error) {
 function buildWelcomeMessage() {
     return [
         "Привіт! Це бот Олександра Мацука для автоматичного створення фінансових таблиць.",
-        "Надішли мені або JSON ТЗ, або текстовий опис (простими словами), і я одразу згенерую таблиці.",
-        "Можеш надсилати додаткові повідомлення з правками, я оновлю чернетку ТЗ.",
+        "Надішли ТЗ у code-блоці з тегом tz (```tz ... ```), і я підготую архітектуру та уточнення.",
+        "Після уточнень згенерую таблицю автоматично.",
         "Для очищення чернетки використай команду /clear."
     ].join("\n\n");
 }
@@ -309,8 +523,56 @@ async function handleTelegramUpdate(update) {
     const shouldClearDraft = command === "/clear";
 
     if (!shouldStart && !shouldBuild && !shouldClearDraft) {
+        const existingDraft = chatId ? getDraft(chatId) : null;
+        if (existingDraft?.status === "clarifying" && existingDraft?.pendingQuestions?.length) {
+            const updated = applyAnswers(existingDraft, message.text || "");
+            const nextDraft = {
+                ...existingDraft,
+                ...updated,
+                status: updated.pendingQuestions.length > 0 ? "clarifying" : "ready_to_build"
+            };
+
+            setDraft(chatId, nextDraft);
+
+            if (nextDraft.pendingQuestions.length > 0) {
+                await sendMessage(
+                    message.chat.id,
+                    nextDraft.pendingQuestions.map((question, index) => `${index + 1}. ${question.text}`).join("\n")
+                );
+
+                return { handled: true, command: "clarify_answers" };
+            }
+
+            const payload = buildPayloadFromTzDraft(nextDraft, message);
+            setDraft(chatId, {
+                ...nextDraft,
+                status: "ready",
+                mode: "tz_code_block",
+                payload
+            });
+
+            await sendMessage(message.chat.id, "Дякую, все зібрав. Запускаю побудову таблиці.");
+            return runBuildAndReply(message, "tz_clarified_auto_build");
+        }
+
         const captured = await captureUserTzMessage(message);
         if (captured?.captured) {
+            if (captured.mode === "tz_code_block") {
+                await sendMessage(message.chat.id, buildArchitectureMessage(captured.analysis));
+                if (captured.pendingQuestions?.length) {
+                    await sendMessage(
+                        message.chat.id,
+                        captured.pendingQuestions.map((question, index) => `${index + 1}. ${question.text}`).join("\n")
+                    );
+                }
+
+                return { handled: true, command: "tz_clarification_started" };
+            }
+
+            if (captured.mode === "tz_invalid") {
+                return { handled: true, command: "tz_invalid" };
+            }
+
             const ack = captured.mode === "json"
                 ? "Отримав JSON ТЗ, запускаю генерацію."
                 : "Отримав текст ТЗ/правки, запускаю генерацію.";

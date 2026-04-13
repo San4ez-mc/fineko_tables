@@ -1,6 +1,8 @@
 const { getGoogleClients } = require("./auth");
 const {
     getOrCreateUserReportsFolder,
+    getOrCreateFolderByName,
+    findSpreadsheetByName,
     setSharingToAnyoneWithLink,
     buildFolderUrl,
     buildSpreadsheetUrl
@@ -124,6 +126,18 @@ function slugify(value) {
 
 function hasUniversalSpec(payload = {}) {
     return Boolean(firstDefined(payload, REPORT_SPEC_ALIASES) || firstDefined(payload, TEXT_TZ_ALIASES));
+}
+
+function hasTzCashflowSpec(payload = {}) {
+    if (!payload || typeof payload !== "object") {
+        return false;
+    }
+
+    if (payload.report_type && String(payload.report_type).toLowerCase() === "cashflow" && payload.tz_struct) {
+        return true;
+    }
+
+    return Array.isArray(payload.tz_struct?.inflows) || Array.isArray(payload.tz_struct?.outflows);
 }
 
 function parseList(value) {
@@ -452,6 +466,233 @@ async function writeSheetBySpec(sheets, spreadsheetId, sheetSpec) {
     }
 }
 
+function sanitizeTitlePart(value, fallback = "Business") {
+    return String(value || fallback)
+        .trim()
+        .replace(/[\\/:*?"<>|]/g, "_")
+        .replace(/\s+/g, " ")
+        .slice(0, 90);
+}
+
+function buildCashflowFileName(companyName, date = new Date()) {
+    const year = date.getFullYear();
+    return `Cashflow_${sanitizeTitlePart(companyName)}_${year}`;
+}
+
+function buildCashflowRowsFromTz(tz = {}) {
+    const inflows = Array.isArray(tz.inflows) ? tz.inflows : [];
+    const outflows = Array.isArray(tz.outflows) ? tz.outflows : [];
+    const allArticles = [...inflows, ...outflows]
+        .map((item) => item.article || item.name || "")
+        .filter(Boolean)
+        .filter((value, index, arr) => arr.indexOf(value) === index);
+
+    return allArticles.map((article, index) => {
+        const row = index + 2;
+        return [
+            article,
+            "=IFERROR(SUMIF('⬇️ Надходження'!C:C,A" + row + ",'⬇️ Надходження'!D:D),0)",
+            "=IFERROR(SUMIF('⬆️ Витрати'!C:C,A" + row + ",'⬆️ Витрати'!D:D),0)",
+            "=B" + row + "-C" + row
+        ];
+    });
+}
+
+function buildDirectoryRows(tz = {}) {
+    const inflows = Array.isArray(tz.inflows) ? tz.inflows : [];
+    const outflows = Array.isArray(tz.outflows) ? tz.outflows : [];
+
+    const rows = [["Тип", "Стаття", "Відповідальний", "Опер./міс", "Має доступ до Sheets"]];
+
+    for (const item of inflows) {
+        rows.push([
+            "Надходження",
+            item.article || "",
+            item.responsible || "",
+            item.ops_per_month || "",
+            item.has_sheets_access === false ? "ні" : "так"
+        ]);
+    }
+
+    for (const item of outflows) {
+        rows.push([
+            "Витрати",
+            item.article || "",
+            item.responsible || "",
+            item.ops_per_month || "",
+            item.has_sheets_access === false ? "ні" : "так"
+        ]);
+    }
+
+    return rows;
+}
+
+function buildSourceRowsByType(items = []) {
+    return items.map((item) => [
+        "",
+        "",
+        item.article || "",
+        "",
+        item.comment || item.fixation_moment || ""
+    ]);
+}
+
+async function createCashflowSpreadsheetInFolder({ drive, sheets, folderId, title, conflictStrategy }) {
+    const existing = await findSpreadsheetByName(drive, title, folderId);
+    if (existing && conflictStrategy === "overwrite") {
+        return {
+            spreadsheetId: existing.id,
+            spreadsheetUrl: existing.webViewLink || buildSpreadsheetUrl(existing.id),
+            reusedExisting: true
+        };
+    }
+
+    const finalTitle = existing && conflictStrategy !== "overwrite"
+        ? `${title}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`
+        : title;
+
+    return createSpreadsheetInFolder(sheets, drive, folderId, finalTitle);
+}
+
+async function buildCashflowV23(payload, options, clients) {
+    const { drive, sheets } = clients;
+    const shareErrors = [];
+    const answers = payload.answers || {};
+    const tz = payload.tz_struct || {};
+    const companyName = sanitizeTitlePart(payload.business_name || tz.business_name || "Business");
+    const topFolderName = sanitizeTitlePart(`Фінансова система - ${companyName}`, "Фінансова система - Business");
+
+    const systemFolder = await getOrCreateFolderByName(drive, topFolderName, {
+        parentFolderId: options.parentFolderId
+    });
+    const cashflowFolder = await getOrCreateFolderByName(drive, "Cashflow", {
+        parentFolderId: systemFolder.id
+    });
+
+    const subFolders = ["P&L", "Баланс", "Дашборд"];
+    for (const subFolder of subFolders) {
+        await getOrCreateFolderByName(drive, subFolder, {
+            parentFolderId: systemFolder.id
+        });
+    }
+
+    const cashflowTitle = buildCashflowFileName(companyName);
+    const spreadsheet = await createCashflowSpreadsheetInFolder({
+        drive,
+        sheets,
+        folderId: cashflowFolder.id,
+        title: cashflowTitle,
+        conflictStrategy: payload.file_conflict_strategy || "new_dated"
+    });
+
+    const incomingItems = Array.isArray(tz.inflows) ? tz.inflows : [];
+    const outgoingItems = Array.isArray(tz.outflows) ? tz.outflows : [];
+    const hasNoAccess = [...incomingItems, ...outgoingItems].some((item) => item.has_sheets_access === false);
+    const includeLog = payload.architecture?.inflowsMode === "C" || payload.architecture?.outflowsMode === "C";
+
+    const requiredSheets = ["📊 Cashflow", "📋 Довідники", "⚙️ Налаштування", "⬇️ Надходження"];
+    if (payload.architecture?.outflowsMode === "B" || payload.architecture?.outflowsMode === "C") {
+        requiredSheets.push("⬆️ Витрати");
+    }
+    if (payload.include_payment_calendar) {
+        requiredSheets.push("📅 Платіжний календар");
+    }
+    if (includeLog) {
+        requiredSheets.push("📝 Лог");
+    }
+
+    const noAccessOutflowPeople = outgoingItems
+        .filter((item) => item.has_sheets_access === false)
+        .map((item) => item.responsible || "Учасник")
+        .filter((value, index, arr) => arr.indexOf(value) === index);
+
+    for (const person of noAccessOutflowPeople) {
+        requiredSheets.push(`⬆️ Витрати - ${person}`);
+    }
+
+    await ensureSheets(sheets, spreadsheet.spreadsheetId, requiredSheets);
+
+    await writeHeaders(sheets, spreadsheet.spreadsheetId, "📊 Cashflow", ["Стаття", "Надходження", "Витрати", "Чистий рух"]);
+    const cashflowRows = buildCashflowRowsFromTz(tz);
+    if (cashflowRows.length > 0) {
+        await writeValues(sheets, spreadsheet.spreadsheetId, "📊 Cashflow!A2", cashflowRows);
+    }
+
+    await writeValues(sheets, spreadsheet.spreadsheetId, "📋 Довідники!A1", buildDirectoryRows(tz));
+
+    await writeValues(sheets, spreadsheet.spreadsheetId, "⚙️ Налаштування!A1", [
+        ["Компанія", companyName],
+        ["Мова", payload.language || answers.language || "українська"],
+        ["Валюта", "UAH"],
+        ["Поріг від'ємного залишку", 0]
+    ]);
+
+    await writeHeaders(sheets, spreadsheet.spreadsheetId, "⬇️ Надходження", ["Дата", "Контрагент", "Стаття", "Сума", "Коментар"]);
+    const inflowRows = buildSourceRowsByType(incomingItems);
+    if (inflowRows.length > 0) {
+        await writeValues(sheets, spreadsheet.spreadsheetId, "⬇️ Надходження!A2", inflowRows);
+    }
+
+    if (requiredSheets.includes("⬆️ Витрати")) {
+        await writeHeaders(sheets, spreadsheet.spreadsheetId, "⬆️ Витрати", ["Дата", "Контрагент", "Стаття", "Сума", "Коментар"]);
+        const outflowRows = buildSourceRowsByType(outgoingItems);
+        if (outflowRows.length > 0) {
+            await writeValues(sheets, spreadsheet.spreadsheetId, "⬆️ Витрати!A2", outflowRows);
+        }
+    }
+
+    for (const person of noAccessOutflowPeople) {
+        const sheetTitle = `⬆️ Витрати - ${person}`;
+        await writeHeaders(sheets, spreadsheet.spreadsheetId, sheetTitle, ["Дата", "Стаття", "Сума", "Коментар"]);
+    }
+
+    if (payload.include_payment_calendar) {
+        await writeHeaders(sheets, spreadsheet.spreadsheetId, "📅 Платіжний календар", ["Дата", "Початковий залишок", "Надходження", "Витрати", "Кінцевий залишок"]);
+    }
+
+    if ((options.shareMode || process.env.GOOGLE_REPORTS_SHARE_MODE) === "anyone_with_link") {
+        await applySharingSafely(drive, systemFolder.id, options.shareRole || "writer", shareErrors, "system folder sharing");
+        await applySharingSafely(drive, cashflowFolder.id, options.shareRole || "writer", shareErrors, "cashflow folder sharing");
+        await applySharingSafely(drive, spreadsheet.spreadsheetId, options.shareRole || "writer", shareErrors, "cashflow file sharing");
+    }
+
+    const validation = await validateReports({
+        drive,
+        sheets,
+        folderId: systemFolder.id,
+        cashflowId: spreadsheet.spreadsheetId,
+        tzPayload: tz,
+        mode: "cashflow_v23"
+    });
+
+    return {
+        mode: "cashflow_v23",
+        folder_id: systemFolder.id,
+        folder_url: buildFolderUrl(systemFolder.id),
+        system_folder_name: topFolderName,
+        generated_files: [
+            {
+                type: "cashflow",
+                title: cashflowTitle,
+                spreadsheet_id: spreadsheet.spreadsheetId,
+                spreadsheet_url: spreadsheet.spreadsheetUrl || buildSpreadsheetUrl(spreadsheet.spreadsheetId)
+            }
+        ],
+        built_summary: [
+            "Аркуш «Cashflow» - зведений звіт з формулами",
+            `Аркуш «Надходження» - ${incomingItems.length} статей`,
+            requiredSheets.includes("⬆️ Витрати") ? "Аркуш «Витрати» - підготовлений для внесення" : "Витрати враховуються через окремі джерела",
+            noAccessOutflowPeople.length > 0 ? `Окремі аркуші без доступу: ${noAccessOutflowPeople.join(", ")}` : "Окремі аркуші без доступу не потрібні",
+            hasNoAccess ? "Google Form не створювалась автоматично, додай вручну за потреби" : "Google Form не потрібна"
+        ],
+        last_build_status: validation.valid ? (shareErrors.length > 0 ? "partial_success" : "success") : "failed",
+        last_build_error: [...validation.errors, ...shareErrors].join("; "),
+        last_validated_at: new Date().toISOString(),
+        validation,
+        share_warnings: shareErrors
+    };
+}
+
 async function buildFromUniversalSpec(payload, options, clients) {
     const { drive, sheets } = clients;
     const shareErrors = [];
@@ -602,6 +843,10 @@ async function buildLegacyFinancialReports(payload, options, clients) {
 
 async function buildReports(payload, options = {}) {
     const clients = getGoogleClients(options.credentials);
+
+    if (hasTzCashflowSpec(payload)) {
+        return buildCashflowV23(payload, options, clients);
+    }
 
     if (hasUniversalSpec(payload)) {
         return buildFromUniversalSpec(payload, options, clients);

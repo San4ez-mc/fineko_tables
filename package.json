@@ -1,14 +1,14 @@
 {
-  "name": "google-sheets-ai-agent",
-  "version": "0.1.0",
-  "description": "Google Drive/Sheets report builder for Cashflow and P&L",
-  "main": "src/server.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node src/server.js"
-  },
-  "dependencies": {
-    "express": "^4.21.2",
-    "googleapis": "^148.0.0"
-  }
+    "name": "google-sheets-ai-agent",
+    "version": "0.1.0",
+    "description": "Google Drive/Sheets report builder for Cashflow and P&L",
+    "main": "src/server.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node src/server.js"
+    },
+    "dependencies": {
+        "express": "^4.21.2",
+        "googleapis": "^148.0.0"
+    }
 }
