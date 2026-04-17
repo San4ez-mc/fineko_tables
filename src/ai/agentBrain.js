@@ -181,6 +181,11 @@ function parseJsonFromText(text) {
     throw new Error("LLM response is not valid JSON");
 }
 
+function isAnthropicModelNotFoundError(error) {
+    const message = String(error?.message || "");
+    return /Anthropic error 404/i.test(message) && (/not_found_error/i.test(message) || /model\s*:/i.test(message));
+}
+
 function tryParseJson(text) {
     try {
         return JSON.parse(String(text || "").trim());
@@ -192,7 +197,16 @@ function tryParseJson(text) {
 async function callJsonTask({ systemPrompt, userPrompt }) {
     const provider = getProvider();
     if (provider === "anthropic") {
-        return callAnthropicJson({ systemPrompt, userPrompt });
+        try {
+            return await callAnthropicJson({ systemPrompt, userPrompt });
+        } catch (error) {
+            if (isAnthropicModelNotFoundError(error) && process.env.OPENROUTER_API_KEY) {
+                console.warn("Anthropic unavailable for current model, falling back to OpenRouter for this request");
+                return callOpenRouterJson({ systemPrompt, userPrompt });
+            }
+
+            throw error;
+        }
     }
 
     if (provider === "openrouter") {
