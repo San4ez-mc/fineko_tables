@@ -146,25 +146,45 @@ function columnToLetter_(col) {
 }
 
 function doPost(e) {
+  var traceId = 'as_' + new Date().getTime() + '_' + Math.floor(Math.random() * 1000000);
   try {
     var payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.start', action: payload.action || '', report_type: payload.report_type || '', telegram_id: payload.telegram_id || '' }));
+    var output;
 
     switch (payload.action) {
       case 'ping':
-        return respond({ status: 'ok', message: 'pong' });
+        output = respond({ status: 'ok', message: 'pong', trace_id: traceId });
+        break;
       case 'build_table':
-        return buildTable(payload);
+        output = buildTable(payload);
+        break;
       case 'update_table':
-        return updateTable(payload);
+        output = updateTable(payload);
+        break;
       case 'list_tables':
-        return listTables(payload);
+        output = listTables(payload);
+        break;
       case 'validate_table':
-        return validateTableAction(payload);
+        output = validateTableAction(payload);
+        break;
       default:
-        return respond({ status: 'error', message: 'unknown action: ' + payload.action });
+        output = respond({ status: 'error', message: 'unknown action: ' + payload.action, trace_id: traceId });
+        break;
     }
+
+    try {
+      var content = output && output.getContent ? output.getContent() : '';
+      var parsed = content ? JSON.parse(content) : {};
+      Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.end', action: payload.action || '', status: parsed.status || '', valid: parsed.valid, errors_count: (parsed.errors || []).length, warnings_count: (parsed.warnings || []).length }));
+    } catch (logErr) {
+      Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.end.log_error', message: String(logErr && logErr.message || logErr) }));
+    }
+
+    return output;
   } catch (err) {
-    return respond({ status: 'error', message: err.message, details: err.stack });
+    Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.error', message: String(err && err.message || err) }));
+    return respond({ status: 'error', message: err.message, details: err.stack, trace_id: traceId });
   }
 }
 
