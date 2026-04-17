@@ -526,16 +526,19 @@ function hasBrokenFormulaError(validation) {
 }
 
 function buildWelcomeMessage() {
-    const llm = getConfigSummary();
-    const llmLine = llm.enabled
-        ? `AI: ${llm.provider}/${llm.model}`
-        : "AI: off (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY)";
-
     return [
-        "Привіт. Цей бот будує фінансові таблиці через Apps Script.",
-        "Надішли ТЗ у code-блоці з тегом tz або просто текстом.",
-        "Команди: /clear /retry /status /tables /use /new",
-        llmLine
+        "Привіт! Допоможу швидко зібрати фінансову таблицю під ваш бізнес.",
+        "Просто надішліть ТЗ у code-блоці з тегом tz або звичайним текстом — далі проведу крок за кроком.",
+        "",
+        "Команди:",
+        "• /status — показати поточний стан роботи",
+        "• /tables — показати список ваших таблиць",
+        "• /use — вибрати активну таблицю для правок",
+        "• /new — почати створення нової таблиці",
+        "• /retry — повторити останню побудову",
+        "• /clear — очистити поточний діалог",
+        "",
+        "Після створення таблиці можна одразу писати правки у вільній формі."
     ].join("\n\n");
 }
 
