@@ -13,7 +13,10 @@ const {
 } = require("../ai/agentBrain");
 
 const DRAFTS = new Map();
+const CHAT_QUEUES = new Map();
+const PROCESSED_UPDATES = new Map();
 const MAX_TOTAL_QUESTIONS = 15;
+const UPDATE_DEDUP_TTL_MS = 10 * 60 * 1000;
 
 const STAGES = {
     IDLE: "idle",
@@ -81,6 +84,46 @@ function clearDraft(chatId) {
         customPlanNotes: "",
         updatedAt: new Date().toISOString()
     });
+}
+
+function pruneProcessedUpdates(nowTs) {
+    for (const [id, ts] of PROCESSED_UPDATES.entries()) {
+        if (nowTs - ts > UPDATE_DEDUP_TTL_MS) {
+            PROCESSED_UPDATES.delete(id);
+        }
+    }
+}
+
+function isDuplicateUpdate(update) {
+    const id = Number(update?.update_id);
+    if (!Number.isInteger(id)) return false;
+
+    const nowTs = Date.now();
+    pruneProcessedUpdates(nowTs);
+
+    if (PROCESSED_UPDATES.has(id)) {
+        return true;
+    }
+
+    PROCESSED_UPDATES.set(id, nowTs);
+    return false;
+}
+
+async function runWithChatQueue(chatId, work) {
+    const previous = CHAT_QUEUES.get(chatId) || Promise.resolve();
+    const current = previous
+        .catch(() => undefined)
+        .then(work);
+
+    CHAT_QUEUES.set(chatId, current);
+
+    try {
+        return await current;
+    } finally {
+        if (CHAT_QUEUES.get(chatId) === current) {
+            CHAT_QUEUES.delete(chatId);
+        }
+    }
 }
 
 function shouldUseAi(draft) {
@@ -1330,91 +1373,107 @@ async function handleNewCommand(message, draft) {
 }
 
 async function handleTelegramUpdate(update) {
+    if (isDuplicateUpdate(update)) {
+        return { handled: true, reason: "duplicate_update" };
+    }
+
     const message = extractMessage(update);
     if (!message || !message.chat) return { handled: false, reason: "No message context" };
 
     const chatId = getChatId(message);
     if (!chatId) return { handled: false, reason: "No chat id" };
 
-    const text = message.text || "";
-    const command = extractCommand(text);
-    const commandArg = extractCommandArg(text);
-    const draft = getDraft(chatId);
+    return runWithChatQueue(chatId, async () => {
+        const text = message.text || "";
+        const command = extractCommand(text);
+        const commandArg = extractCommandArg(text);
+        const draft = getDraft(chatId);
 
-    if (command === "/clear") {
-        clearDraft(chatId);
-        await sendMessage(chatId, "🗑 Стан очищено. Можеш починати з нового ТЗ.");
-        return { handled: true, command };
-    }
-
-    if (command === "/status") {
-        await sendMessage(chatId, buildStatusMessage(draft));
-        return { handled: true, command };
-    }
-
-    if (command === "/tables") {
-        try {
-            const tablesInfo = await loadTablesForUser(message);
-            await sendMessage(chatId, formatTablesList(tablesInfo, draft));
-        } catch (error) {
-            await sendMessage(chatId, `Не вдалося отримати список таблиць: ${error.message}`);
-        }
-        return { handled: true, command };
-    }
-
-    if (command === "/use") {
-        return handleUseCommand(message, draft, commandArg);
-    }
-
-    if (command === "/new") {
-        return handleNewCommand(message, draft);
-    }
-
-    if (isNewTableButtonText(text)) {
-        return handleNewCommand(message, draft);
-    }
-
-    if (command === "/retry") {
-        if (!draft.lastPayload) {
-            await sendMessage(chatId, "Немає payload для повтору. Надішли ТЗ або JSON.");
+        if (draft.stage === STAGES.BUILDING && command === "/retry") {
+            await sendMessage(chatId, "Побудова вже триває. Дочекайся завершення поточної спроби.");
             return { handled: true, command };
         }
-        await sendMessage(chatId, "🔄 Повторюю побудову...");
-        return runBuildAndReply(message, draft, draft.lastPayload, "retry");
-    }
 
-    if (command === "/start") {
-        const welcomeMessage = buildWelcomeMessage();
-        const brandPhotoUrl = getBrandPhotoUrl();
-        if (brandPhotoUrl) {
-            await sendPhoto(chatId, brandPhotoUrl, welcomeMessage);
-        } else {
-            await sendMessage(chatId, welcomeMessage);
+        if (command === "/clear") {
+            clearDraft(chatId);
+            await sendMessage(chatId, "🗑 Стан очищено. Можеш починати з нового ТЗ.");
+            return { handled: true, command };
         }
-        return { handled: true, command };
-    }
 
-    if (draft.stage === STAGES.COLLECTING && ((draft.pendingQuestions?.length || 0) > 0 || (draft.questionsQueue?.length || 0) > 0)) {
-        return handleCollectingAnswers(message, draft);
-    }
+        if (command === "/status") {
+            await sendMessage(chatId, buildStatusMessage(draft));
+            return { handled: true, command };
+        }
 
-    if (draft.stage === STAGES.CONFIRMING) {
-        return handleConfirmation(message, draft);
-    }
+        if (command === "/tables") {
+            try {
+                const tablesInfo = await loadTablesForUser(message);
+                await sendMessage(chatId, formatTablesList(tablesInfo, draft));
+            } catch (error) {
+                await sendMessage(chatId, `Не вдалося отримати список таблиць: ${error.message}`);
+            }
+            return { handled: true, command };
+        }
 
-    if (draft.stage === STAGES.EDITING) {
-        return handleEditingMode(message, draft);
-    }
+        if (command === "/use") {
+            return handleUseCommand(message, draft, commandArg);
+        }
 
-    if (!command && resolveActiveTable(draft) && /(додай|видали|перейменуй|change|remove|rename|add)/i.test(text)) {
-        return handleEditingMode(message, {
-            ...draft,
-            stage: STAGES.EDITING,
-            spreadsheet_id: resolveActiveTable(draft)?.spreadsheet_id || draft.spreadsheet_id
-        });
-    }
+        if (command === "/new") {
+            return handleNewCommand(message, draft);
+        }
 
-    return handleTzCapture(message, draft);
+        if (isNewTableButtonText(text)) {
+            return handleNewCommand(message, draft);
+        }
+
+        if (command === "/retry") {
+            if (!draft.lastPayload) {
+                await sendMessage(chatId, "Немає payload для повтору. Надішли ТЗ або JSON.");
+                return { handled: true, command };
+            }
+            await sendMessage(chatId, "🔄 Повторюю побудову...");
+            return runBuildAndReply(message, draft, draft.lastPayload, "retry");
+        }
+
+        if (command === "/start") {
+            const welcomeMessage = buildWelcomeMessage();
+            const brandPhotoUrl = getBrandPhotoUrl();
+            if (brandPhotoUrl) {
+                await sendPhoto(chatId, brandPhotoUrl, welcomeMessage);
+            } else {
+                await sendMessage(chatId, welcomeMessage);
+            }
+            return { handled: true, command };
+        }
+
+        if (draft.stage === STAGES.BUILDING) {
+            await sendMessage(chatId, "Побудова вже триває. Дочекайся завершення або використай /status.");
+            return { handled: true, command: "build_in_progress" };
+        }
+
+        if (draft.stage === STAGES.COLLECTING && ((draft.pendingQuestions?.length || 0) > 0 || (draft.questionsQueue?.length || 0) > 0)) {
+            return handleCollectingAnswers(message, draft);
+        }
+
+        if (draft.stage === STAGES.CONFIRMING) {
+            return handleConfirmation(message, draft);
+        }
+
+        if (draft.stage === STAGES.EDITING) {
+            return handleEditingMode(message, draft);
+        }
+
+        if (!command && resolveActiveTable(draft) && /(додай|видали|перейменуй|change|remove|rename|add)/i.test(text)) {
+            return handleEditingMode(message, {
+                ...draft,
+                stage: STAGES.EDITING,
+                spreadsheet_id: resolveActiveTable(draft)?.spreadsheet_id || draft.spreadsheet_id
+            });
+        }
+
+        return handleTzCapture(message, draft);
+    });
 }
 
 module.exports = {
