@@ -1,5 +1,5 @@
 ﻿const { buildReports } = require("../google/reportBuilder");
-const { buildTableViaAppsScript, updateTableViaAppsScript } = require("../google/appsScriptClient");
+const { buildTableViaAppsScript, updateTableViaAppsScript, listTablesViaAppsScript } = require("../google/appsScriptClient");
 const { sendMessage, sendPhoto } = require("./bot");
 const { parseTzFromTelegramMessage, analyzeArchitecture } = require("./tzParser");
 const {
@@ -35,8 +35,8 @@ function getDraft(chatId) {
         pendingQuestions: [],
         lastPayload: null,
         legacyFallbackUsed: false,
-        tables: [],
         activeTableId: null,
+        activeTableName: null,
         updatedAt: new Date().toISOString()
     };
 }
@@ -64,8 +64,8 @@ function clearDraft(chatId) {
         pendingQuestions: [],
         lastPayload: null,
         legacyFallbackUsed: false,
-        tables: current.tables || [],
-        activeTableId: current.activeTableId || null,
+        activeTableId: null,
+        activeTableName: null,
         updatedAt: new Date().toISOString()
     });
 }
@@ -316,38 +316,42 @@ function buildTableEntry(file, payload) {
     };
 }
 
-function mergeTables(existingTables = [], newEntries = []) {
-    const map = new Map();
-
-    existingTables.forEach((item) => {
-        if (item?.spreadsheet_id) {
-            map.set(item.spreadsheet_id, item);
-        }
-    });
-
-    newEntries.forEach((item) => {
-        if (item?.spreadsheet_id) {
-            map.set(item.spreadsheet_id, item);
-        }
-    });
-
-    return Array.from(map.values());
-}
-
 function resolveActiveTable(draft) {
     const activeId = draft.activeTableId || draft.spreadsheet_id || null;
     if (!activeId) return null;
-    return (draft.tables || []).find((item) => item.spreadsheet_id === activeId) || null;
+    return {
+        spreadsheet_id: activeId,
+        name: draft.activeTableName || "(unknown)"
+    };
 }
 
-function formatTablesList(draft) {
-    const tables = draft.tables || [];
+async function loadTablesForUser(message) {
+    const identity = getTelegramIdentity(message);
+    const response = await listTablesViaAppsScript({
+        telegram_id: identity.telegram_id,
+        telegram_username: identity.telegram_username
+    });
+
+    return {
+        folderUrl: response.folder_url || "",
+        folderExists: response.folder_exists !== false,
+        clientFolder: response.client_folder || "",
+        tables: Array.isArray(response.tables) ? response.tables : []
+    };
+}
+
+function formatTablesList(tablesInfo, draft) {
+    const tables = tablesInfo.tables || [];
     if (tables.length === 0) {
-        return "Для цього Telegram акаунта ще немає таблиць у пам'яті бота.";
+        const folderLine = tablesInfo.clientFolder ? `Папка: ${tablesInfo.clientFolder}` : "";
+        return ["У папці клієнта поки немає таблиць.", folderLine].filter(Boolean).join("\n");
     }
 
     const activeId = draft.activeTableId || draft.spreadsheet_id || null;
     const lines = ["Список таблиць:"];
+    if (tablesInfo.clientFolder) lines.push(`Папка клієнта: ${tablesInfo.clientFolder}`);
+    if (tablesInfo.folderUrl) lines.push(`Folder URL: ${tablesInfo.folderUrl}`);
+    lines.push("");
 
     tables.forEach((item, index) => {
         const mark = item.spreadsheet_id === activeId ? " [ACTIVE]" : "";
@@ -360,11 +364,10 @@ function formatTablesList(draft) {
     return lines.join("\n");
 }
 
-function selectTableFromArg(draft, argRaw) {
+function selectTableFromArg(tables, argRaw) {
     const arg = normalizeText(argRaw);
     if (!arg) return null;
 
-    const tables = draft.tables || [];
     const byId = tables.find((item) => item.spreadsheet_id === arg);
     if (byId) return byId;
 
@@ -468,7 +471,7 @@ function buildStatusMessage(draft) {
         `questions_left: ${Array.isArray(draft.questionsQueue) ? draft.questionsQueue.length : 0}`,
         `has_payload: ${draft.payload ? "yes" : "no"}`,
         `active_table_id: ${active?.spreadsheet_id || "-"}`,
-        `tables_count: ${(draft.tables || []).length}`,
+        `active_table_name: ${draft.activeTableName || "-"}`,
         `legacy_fallback_used: ${draft.legacyFallbackUsed ? "yes" : "no"}`,
         `ai_enabled: ${llm.enabled ? "yes" : "no"}`,
         `ai_provider: ${llm.provider}`,
@@ -498,8 +501,8 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
         if (build.engine === "apps_script") {
             const files = Array.isArray(build.result.files) ? build.result.files : [];
             const entries = files.map((file) => buildTableEntry(file, payload)).filter(Boolean);
-            const mergedTables = mergeTables(nowDraft.tables, entries);
             const activeId = entries[0]?.spreadsheet_id || nowDraft.activeTableId || null;
+            const activeName = entries[0]?.name || nowDraft.activeTableName || null;
 
             const updatedDraft = {
                 ...nowDraft,
@@ -507,7 +510,7 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
                 payload,
                 spreadsheet_id: activeId,
                 activeTableId: activeId,
-                tables: mergedTables,
+                activeTableName: activeName,
                 legacyFallbackUsed: false
             };
             setDraft(chatId, updatedDraft);
@@ -525,8 +528,8 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
             }, payload))
             .filter(Boolean);
 
-        const mergedTables = mergeTables(nowDraft.tables, legacyEntries);
         const activeId = legacyEntries[0]?.spreadsheet_id || nowDraft.activeTableId || null;
+        const activeName = legacyEntries[0]?.name || nowDraft.activeTableName || null;
 
         const updatedDraft = {
             ...nowDraft,
@@ -534,7 +537,7 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
             payload,
             spreadsheet_id: activeId,
             activeTableId: activeId,
-            tables: mergedTables,
+            activeTableName: activeName,
             legacyFallbackUsed: true
         };
         setDraft(chatId, updatedDraft);
@@ -769,7 +772,16 @@ async function handleEditingMode(message, draft) {
 
 async function handleUseCommand(message, draft, argRaw) {
     const chatId = message.chat.id;
-    const selected = selectTableFromArg(draft, argRaw);
+    let tablesInfo;
+
+    try {
+        tablesInfo = await loadTablesForUser(message);
+    } catch (error) {
+        await sendMessage(chatId, `Не вдалося отримати список таблиць: ${error.message}`);
+        return { handled: true, command: "use_load_error" };
+    }
+
+    const selected = selectTableFromArg(tablesInfo.tables, argRaw);
 
     if (!selected) {
         await sendMessage(chatId, "Не знайшов таблицю. Використай /tables і потім /use <номер або spreadsheet_id>.");
@@ -780,6 +792,7 @@ async function handleUseCommand(message, draft, argRaw) {
         ...draft,
         activeTableId: selected.spreadsheet_id,
         spreadsheet_id: selected.spreadsheet_id,
+        activeTableName: selected.name || null,
         stage: STAGES.EDITING
     });
 
@@ -800,7 +813,10 @@ async function handleNewCommand(message, draft) {
         payload: null,
         answers: {},
         questionsQueue: [],
-        pendingQuestions: []
+        pendingQuestions: [],
+        activeTableId: draft.activeTableId || null,
+        activeTableName: draft.activeTableName || null,
+        spreadsheet_id: draft.activeTableId || null
     });
 
     await sendMessage(chatId, "Ок, починаємо нову таблицю. Надішли нове ТЗ (можна звичайним текстом).\nАктивну таблицю для правок можна змінити через /use.");
@@ -831,7 +847,12 @@ async function handleTelegramUpdate(update) {
     }
 
     if (command === "/tables") {
-        await sendMessage(chatId, formatTablesList(draft));
+        try {
+            const tablesInfo = await loadTablesForUser(message);
+            await sendMessage(chatId, formatTablesList(tablesInfo, draft));
+        } catch (error) {
+            await sendMessage(chatId, `Не вдалося отримати список таблиць: ${error.message}`);
+        }
         return { handled: true, command };
     }
 

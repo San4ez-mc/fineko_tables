@@ -77,9 +77,17 @@ async function updateTableViaAppsScript(payload) {
     });
 }
 
+async function listTablesViaAppsScript(payload) {
+    return callAppsScript({
+        action: "list_tables",
+        ...(payload || {})
+    });
+}
+
 module.exports = {
     callAppsScript,
     pingAppsScript,
     buildTableViaAppsScript,
-    updateTableViaAppsScript
+    updateTableViaAppsScript,
+    listTablesViaAppsScript
 };

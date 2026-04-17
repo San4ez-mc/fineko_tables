@@ -12,6 +12,8 @@ function doPost(e) {
         return buildTable(payload);
       case 'update_table':
         return updateTable(payload);
+      case 'list_tables':
+        return listTables(payload);
       default:
         return respond({ status: 'error', message: 'unknown action: ' + payload.action });
     }
@@ -35,27 +37,22 @@ function buildTable(payload) {
     var reportType = String(payload.report_type || '').toLowerCase();
 
     var rootFolder = getOrCreateRootFolder_();
-    var businessFolder = getOrCreateFolder(rootFolder, businessName);
-    var reportFolder = getOrCreateFolder(businessFolder, reportFolderName_(reportType));
-
-    getOrCreateFolder(businessFolder, 'P&L');
-    getOrCreateFolder(businessFolder, 'Баланс');
-    getOrCreateFolder(businessFolder, 'Дашборд');
+    var clientFolderName = buildClientFolderName_(payload);
+    var clientFolder = getOrCreateFolder(rootFolder, clientFolderName);
 
     var baseFileName = titleByType_(reportType) + '_' + businessName + '_' + year;
-    var resolvedFileName = resolveFileName(reportFolder, baseFileName);
+    var resolvedFileName = resolveFileName(clientFolder, baseFileName);
 
     var ss = SpreadsheetApp.create(resolvedFileName);
     var file = DriveApp.getFileById(ss.getId());
-    reportFolder.addFile(file);
+    clientFolder.addFile(file);
     DriveApp.getRootFolder().removeFile(file);
 
     var context = {
       payload: payload,
       spreadsheet: ss,
       reportType: reportType,
-      businessFolder: businessFolder,
-      reportFolder: reportFolder,
+      clientFolder: clientFolder,
       file: file,
       forms: [],
       sheetsBuilt: []
@@ -71,7 +68,7 @@ function buildTable(payload) {
       buildDashboard_(context);
     }
 
-    setPermissions(reportFolder, file, payload.user_email, payload.share_mode || DEFAULT_SHARE_MODE);
+    setPermissions(clientFolder, file, payload.user_email, payload.share_mode || DEFAULT_SHARE_MODE);
 
     var validation = validateBuiltFile(ss, payload);
     var files = [{
@@ -82,7 +79,8 @@ function buildTable(payload) {
 
     return respond({
       status: validation.valid ? 'ok' : 'error',
-      folder_url: reportFolder.getUrl(),
+      folder_url: clientFolder.getUrl(),
+      client_folder: clientFolderName,
       files: files,
       forms: context.forms,
       sheets_built: context.sheetsBuilt,
@@ -95,6 +93,51 @@ function buildTable(payload) {
       details: err.message
     });
   }
+}
+
+function listTables(payload) {
+  var rootFolder = getOrCreateRootFolder_();
+  var clientFolderName = buildClientFolderName_(payload || {});
+  var clientFolder = findFolderByName_(rootFolder, clientFolderName);
+
+  if (!clientFolder) {
+    return respond({
+      status: 'ok',
+      folder_exists: false,
+      client_folder: clientFolderName,
+      folder_url: null,
+      tables: []
+    });
+  }
+
+  var files = clientFolder.getFiles();
+  var tables = [];
+
+  while (files.hasNext()) {
+    var file = files.next();
+    if (file.getMimeType() !== MimeType.GOOGLE_SHEETS) {
+      continue;
+    }
+
+    tables.push({
+      name: file.getName(),
+      url: file.getUrl(),
+      spreadsheet_id: file.getId(),
+      updated_at: file.getLastUpdated()
+    });
+  }
+
+  tables.sort(function(a, b) {
+    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+  });
+
+  return respond({
+    status: 'ok',
+    folder_exists: true,
+    client_folder: clientFolderName,
+    folder_url: clientFolder.getUrl(),
+    tables: tables
+  });
 }
 
 function updateTable(payload) {
@@ -667,6 +710,36 @@ function getOrCreateFolder(parentFolder, name) {
     return existing.next();
   }
   return parentFolder.createFolder(name);
+}
+
+function findFolderByName_(parentFolder, name) {
+  var existing = parentFolder.getFoldersByName(name);
+  if (existing.hasNext()) {
+    return existing.next();
+  }
+  return null;
+}
+
+function buildClientFolderName_(payload) {
+  var username = sanitizeTelegramUsername_(payload.telegram_username || '');
+  if (username) {
+    return 'client_tg_' + username;
+  }
+
+  var tgId = String(payload.telegram_id || '').trim();
+  if (tgId) {
+    return 'client_tg_id_' + tgId;
+  }
+
+  return 'client_tg_unknown';
+}
+
+function sanitizeTelegramUsername_(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[^a-zA-Z0-9_]/g, '')
+    .toLowerCase();
 }
 
 function resolveFileName(folder, baseName) {
