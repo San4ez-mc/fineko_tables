@@ -42,6 +42,8 @@ function getDraft(chatId) {
         askedQuestionsCount: 0,
         businessNameResolved: null,
         aiTemporarilyDisabled: false,
+        customMode: false,
+        customPlanNotes: "",
         updatedAt: new Date().toISOString()
     };
 }
@@ -74,6 +76,8 @@ function clearDraft(chatId) {
         askedQuestionsCount: 0,
         businessNameResolved: null,
         aiTemporarilyDisabled: false,
+        customMode: false,
+        customPlanNotes: "",
         updatedAt: new Date().toISOString()
     });
 }
@@ -272,6 +276,28 @@ function normalizeReportType(value) {
     const text = normalizeText(value).toLowerCase();
     const allowed = ["cashflow", "pl", "balance", "dashboard"];
     return allowed.includes(text) ? text : "";
+}
+
+function detectKnownTypeFromText(text) {
+    const source = String(text || "").toLowerCase();
+    if (/(кешфлоу|кеш\s*флоу|кефлоу|cash\s*flow|cashflow)/i.test(source)) return "cashflow";
+    if (/(p&l|\bpl\b|п\s*&\s*л|прибут|збитк)/i.test(source)) return "pl";
+    if (/(баланс|balance)/i.test(source)) return "balance";
+    if (/(дашборд|dashboard)/i.test(source)) return "dashboard";
+    return "";
+}
+
+function detectRoutingMode(text, parsedTz) {
+    const fromTz = normalizeReportType(parsedTz?.report_type);
+    if (fromTz) return { mode: "known", reportType: fromTz };
+
+    const fromText = detectKnownTypeFromText(text);
+    if (fromText) return { mode: "known", reportType: fromText };
+
+    const asksToBuild = /(зроби|побудуй|створи|потрібна|потрібен|таблиц|table)/i.test(String(text || ""));
+    if (asksToBuild) return { mode: "custom", reportType: "" };
+
+    return { mode: "unknown", reportType: "" };
 }
 
 function findNoAccessItemsWithoutMode(tz) {
@@ -781,6 +807,57 @@ async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) 
     }
 }
 
+async function startCustomArchitectureMode(message, draft) {
+    const chatId = message.chat.id;
+    const rawText = normalizeText(message.text || "");
+
+    const customDefaultQuestions = [
+        { key: "custom_goal", text: "Яка головна мета таблиці і яке рішення має прийматись на її основі?" },
+        { key: "custom_tabs", text: "Які аркуші/блоки потрібні (3-7 пунктів) і що на кожному зберігається?" },
+        { key: "custom_fields", text: "Які ключові поля та формули обов'язкові?" },
+        { key: "custom_users", text: "Хто буде вносити дані і хто тільки переглядатиме?" }
+    ];
+
+    let messageText = "Вмикаю режим архітектора для кастомної таблиці. Зберу план і далі побудуємо структуру.";
+    let questions = customDefaultQuestions;
+
+    if (shouldUseAi(draft)) {
+        try {
+            const ai = await generateClarificationBundle({
+                mode: "custom_architect",
+                user_request: rawText,
+                defaultQuestions: customDefaultQuestions,
+                questionBudget: 8
+            });
+            if (ai?.message) messageText = ai.message;
+            if (Array.isArray(ai?.questions) && ai.questions.length > 0) questions = ai.questions.slice(0, 8);
+        } catch (error) {
+            disableAiForChat(chatId, draft, error?.message);
+        }
+    }
+
+    const pendingQuestions = nextQuestionBatch(questions);
+
+    setDraft(chatId, {
+        ...draft,
+        stage: STAGES.COLLECTING,
+        customMode: true,
+        customPlanNotes: rawText,
+        questionsQueue: questions,
+        pendingQuestions,
+        answers: {},
+        askedQuestionsCount: Number(draft.askedQuestionsCount || 0) + pendingQuestions.length
+    });
+
+    await sendMessage(chatId, messageText);
+    await sendMessage(chatId, [
+        "Щоб почати планування, дай відповіді на ці пункти:",
+        ...pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`)
+    ].join("\n"));
+
+    return { handled: true, command: "custom_architect_started" };
+}
+
 async function parseTzFromAnyText(message, chatId, draft) {
     const parsed = parseTzFromTelegramMessage(message);
     if (parsed.detected && parsed.parsed) {
@@ -892,19 +969,32 @@ async function handleTzCapture(message, draft) {
     }
 
     const tz = await parseTzFromAnyText(message, chatId, draft);
-    if (!tz) {
+    const routing = detectRoutingMode(text, tz);
+
+    if (routing.mode === "custom") {
+        return startCustomArchitectureMode(message, draft);
+    }
+
+    if (!tz && routing.mode !== "known") {
         await sendMessage(chatId, "Надішли ТЗ у tz code block, JSON або просто текст з описом процесу.");
         return { handled: true, command: "awaiting_tz" };
     }
 
-    const analysis = analyzeArchitecture(tz);
-    const businessNameResolved = await resolveBusinessName(tz, text, message, draft, chatId);
-    const questionsQueue = buildQuestionQueue(tz, analysis, draft.askedQuestionsCount);
-    const aiBundle = await buildClarificationWithAi(chatId, tz, analysis, questionsQueue);
+    const preparedTz = tz || {
+        report_type: routing.reportType || "cashflow",
+        business_name: "Business",
+        inflows: [{ article: "Оплата від клієнтів", responsible: "Owner", ops_per_month: 20, has_sheets_access: true }],
+        outflows: [{ article: "Операційні витрати", responsible: "Owner", ops_per_month: 20, has_sheets_access: true }]
+    };
+
+    const analysis = analyzeArchitecture(preparedTz);
+    const businessNameResolved = await resolveBusinessName(preparedTz, text, message, draft, chatId);
+    const questionsQueue = buildQuestionQueue(preparedTz, analysis, draft.askedQuestionsCount);
+    const aiBundle = await buildClarificationWithAi(chatId, preparedTz, analysis, questionsQueue);
     const pendingQuestions = nextQuestionBatch(aiBundle.questions);
 
     if (aiBundle.questions.length === 0) {
-        const readyTz = ensureBuildMinimum(tz);
+        const readyTz = ensureBuildMinimum(preparedTz);
         const directDraft = {
             ...draft,
             stage: STAGES.CONFIRMING,
@@ -927,9 +1017,9 @@ async function handleTzCapture(message, draft) {
     setDraft(chatId, {
         ...draft,
         stage: STAGES.COLLECTING,
-        report_type: String(tz.report_type || "cashflow").toLowerCase(),
+        report_type: String(preparedTz.report_type || "cashflow").toLowerCase(),
         raw_input: text,
-        extracted: tz,
+        extracted: preparedTz,
         analysis,
         businessNameResolved,
         questionsQueue: aiBundle.questions,
@@ -967,6 +1057,25 @@ async function handleCollectingAnswers(message, draft) {
         setDraft(chatId, nextDraft);
         await sendMessage(chatId, updated.pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`).join("\n"));
         return { handled: true, command: "clarify_answers" };
+    }
+
+    if (draft.customMode) {
+        const summary = [
+            "План кастомної таблиці зібрано.",
+            "На цьому кроці архітектор підготував вимоги до структури.",
+            "Далі можемо або:",
+            "1) Звузити задачу до одного з готових типів: cashflow / pl / balance / dashboard",
+            "2) Увімкнути повний конструктор кастом-таблиць (окремий етап)"
+        ].join("\n");
+
+        setDraft(chatId, {
+            ...nextDraft,
+            stage: STAGES.IDLE,
+            customMode: false,
+            customPlanNotes: JSON.stringify(nextDraft.answers || {})
+        });
+        await sendMessage(chatId, summary);
+        return { handled: true, command: "custom_architect_finished" };
     }
 
     const readyDraft = {
@@ -1140,6 +1249,8 @@ async function handleNewCommand(message, draft) {
         askedQuestionsCount: 0,
         businessNameResolved: null,
         aiTemporarilyDisabled: false,
+        customMode: false,
+        customPlanNotes: "",
         activeTableId: draft.activeTableId || null,
         activeTableName: draft.activeTableName || null,
         spreadsheet_id: draft.activeTableId || null
