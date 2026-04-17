@@ -212,6 +212,31 @@ async function generateBusinessNameFromText(input) {
     return name;
 }
 
+async function generateCustomTableBlueprint(input) {
+    const systemPrompt = [
+        "You are a product architect for spreadsheet systems.",
+        "Return only JSON.",
+        "Design a practical table blueprint from user requirements.",
+        "Keep concise but complete.",
+        "Use Ukrainian text in labels."
+    ].join(" ");
+
+    const userPrompt = `Input:\n${JSON.stringify(input || {}, null, 2)}\n\nReturn JSON:\n{\n  "title": "...",\n  "goal": "...",\n  "sheet_plan": [{"name":"...","purpose":"...","editable_by":["..."]}],\n  "fields": [{"sheet":"...","name":"...","type":"text|number|date|select|formula","required":true}],\n  "formulas": [{"sheet":"...","cell":"A1","formula":"=...","description":"..."}],\n  "roles": [{"role":"...","can_edit":["..."],"can_view":["..."]}],\n  "automation": [{"trigger":"...","action":"..."}],\n  "risks": ["..."],\n  "open_questions": ["..."]\n}`;
+
+    const data = await callJsonTask({ systemPrompt, userPrompt });
+    return {
+        title: String(data.title || "Кастомна таблиця").trim(),
+        goal: String(data.goal || "").trim(),
+        sheet_plan: Array.isArray(data.sheet_plan) ? data.sheet_plan : [],
+        fields: Array.isArray(data.fields) ? data.fields : [],
+        formulas: Array.isArray(data.formulas) ? data.formulas : [],
+        roles: Array.isArray(data.roles) ? data.roles : [],
+        automation: Array.isArray(data.automation) ? data.automation : [],
+        risks: Array.isArray(data.risks) ? data.risks.map((v) => String(v)) : [],
+        open_questions: Array.isArray(data.open_questions) ? data.open_questions.map((v) => String(v)) : []
+    };
+}
+
 async function generateUpdatePayloadFromText(input) {
     const systemPrompt = [
         "You convert user edit requests to update_table payload.",
@@ -255,5 +280,6 @@ module.exports = {
     generateClarificationBundle,
     generateUpdatePayloadFromText,
     generateTzFromFreeText,
-    generateBusinessNameFromText
+    generateBusinessNameFromText,
+    generateCustomTableBlueprint
 };

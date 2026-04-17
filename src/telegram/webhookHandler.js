@@ -8,7 +8,8 @@ const {
     generateClarificationBundle,
     generateUpdatePayloadFromText,
     generateTzFromFreeText,
-    generateBusinessNameFromText
+    generateBusinessNameFromText,
+    generateCustomTableBlueprint
 } = require("../ai/agentBrain");
 
 const DRAFTS = new Map();
@@ -943,6 +944,27 @@ function ensureBuildMinimum(tz) {
     return next;
 }
 
+function fallbackCustomBlueprint(answers, rawRequest) {
+    const values = Object.entries(answers || {}).map(([k, v]) => `${k}: ${String(v || "")}`);
+    return {
+        title: "Кастомна таблиця",
+        goal: normalizeText(rawRequest) || "Кастомний облік",
+        sheet_plan: [
+            { name: "Ввід", purpose: "Основні записи", editable_by: ["Оператор"] },
+            { name: "Зведення", purpose: "Аналітика і підсумки", editable_by: ["Менеджер"] }
+        ],
+        fields: [],
+        formulas: [],
+        roles: [
+            { role: "Оператор", can_edit: ["Ввід"], can_view: ["Зведення"] },
+            { role: "Менеджер", can_edit: ["Зведення"], can_view: ["Ввід", "Зведення"] }
+        ],
+        automation: [],
+        risks: ["Потрібна деталізація полів і формул"],
+        open_questions: values.length ? values : ["Потрібно уточнити структуру полів"]
+    };
+}
+
 async function handleTzCapture(message, draft) {
     const chatId = message.chat.id;
     const text = normalizeText(message.text);
@@ -1060,21 +1082,41 @@ async function handleCollectingAnswers(message, draft) {
     }
 
     if (draft.customMode) {
+        let blueprint = null;
+        if (shouldUseAi(draft)) {
+            try {
+                blueprint = await generateCustomTableBlueprint({
+                    request: draft.customPlanNotes,
+                    answers: nextDraft.answers,
+                    history: nextDraft.history || []
+                });
+            } catch (error) {
+                disableAiForChat(chatId, draft, error?.message);
+            }
+        }
+        if (!blueprint) {
+            blueprint = fallbackCustomBlueprint(nextDraft.answers, draft.customPlanNotes);
+        }
+
         const summary = [
             "План кастомної таблиці зібрано.",
-            "На цьому кроці архітектор підготував вимоги до структури.",
-            "Далі можемо або:",
-            "1) Звузити задачу до одного з готових типів: cashflow / pl / balance / dashboard",
-            "2) Увімкнути повний конструктор кастом-таблиць (окремий етап)"
-        ].join("\n");
+            `Назва плану: ${blueprint.title}`,
+            blueprint.goal ? `Мета: ${blueprint.goal}` : "",
+            `Аркушів у плані: ${Array.isArray(blueprint.sheet_plan) ? blueprint.sheet_plan.length : 0}`,
+            "",
+            "Що далі:",
+            "1) Можемо звузити задачу до готового типу (cashflow / pl / balance / dashboard) і будувати одразу.",
+            "2) Або рухатись у full custom builder за цим blueprint."
+        ].filter(Boolean).join("\n");
 
         setDraft(chatId, {
             ...nextDraft,
             stage: STAGES.IDLE,
             customMode: false,
-            customPlanNotes: JSON.stringify(nextDraft.answers || {})
+            customPlanNotes: JSON.stringify(blueprint, null, 2)
         });
         await sendMessage(chatId, summary);
+        await sendMessage(chatId, `Blueprint JSON:\n\n${JSON.stringify(blueprint, null, 2)}`);
         return { handled: true, command: "custom_architect_finished" };
     }
 
