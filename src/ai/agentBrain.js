@@ -210,9 +210,30 @@ async function generateUpdatePayloadFromText(input) {
     };
 }
 
+async function generateTzFromFreeText(input) {
+    const systemPrompt = [
+        "You convert unstructured user text into TZ JSON for financial table builder.",
+        "Return only JSON.",
+        "Prefer report_type=cashflow unless clearly stated otherwise.",
+        "If data is missing keep arrays empty but preserve shape."
+    ].join(" ");
+
+    const userPrompt = `User text:\n${String(input || "")}\n\nReturn JSON:\n{\n  "report_type": "cashflow|pl|balance|dashboard",\n  "business_name": "...",\n  "inflows": [{"article":"...","responsible":"...","ops_per_month":0,"has_sheets_access":true}],\n  "outflows": [{"article":"...","responsible":"...","ops_per_month":0,"has_sheets_access":true}]\n}`;
+
+    const data = await callJsonTask({ systemPrompt, userPrompt });
+
+    return {
+        report_type: String(data.report_type || "cashflow").toLowerCase(),
+        business_name: String(data.business_name || "Business").trim(),
+        inflows: Array.isArray(data.inflows) ? data.inflows : [],
+        outflows: Array.isArray(data.outflows) ? data.outflows : []
+    };
+}
+
 module.exports = {
     isEnabled,
     getConfigSummary,
     generateClarificationBundle,
-    generateUpdatePayloadFromText
+    generateUpdatePayloadFromText,
+    generateTzFromFreeText
 };

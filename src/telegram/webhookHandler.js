@@ -6,7 +6,8 @@ const {
     isEnabled: isLlmEnabled,
     getConfigSummary,
     generateClarificationBundle,
-    generateUpdatePayloadFromText
+    generateUpdatePayloadFromText,
+    generateTzFromFreeText
 } = require("../ai/agentBrain");
 
 const DRAFTS = new Map();
@@ -34,6 +35,8 @@ function getDraft(chatId) {
         pendingQuestions: [],
         lastPayload: null,
         legacyFallbackUsed: false,
+        tables: [],
+        activeTableId: null,
         updatedAt: new Date().toISOString()
     };
 }
@@ -46,7 +49,25 @@ function setDraft(chatId, draft) {
 }
 
 function clearDraft(chatId) {
-    DRAFTS.delete(chatId);
+    const current = getDraft(chatId);
+    DRAFTS.set(chatId, {
+        stage: STAGES.IDLE,
+        report_type: null,
+        raw_input: "",
+        extracted: {},
+        clarifications: [],
+        payload: null,
+        spreadsheet_id: null,
+        history: [],
+        answers: {},
+        questionsQueue: [],
+        pendingQuestions: [],
+        lastPayload: null,
+        legacyFallbackUsed: false,
+        tables: current.tables || [],
+        activeTableId: current.activeTableId || null,
+        updatedAt: new Date().toISOString()
+    });
 }
 
 function extractMessage(update) {
@@ -58,6 +79,11 @@ function extractMessage(update) {
 function extractCommand(text) {
     if (!text || !text.startsWith("/")) return "";
     return text.trim().split(/\s+/)[0].toLowerCase();
+}
+
+function extractCommandArg(text) {
+    const parts = String(text || "").trim().split(/\s+/);
+    return parts.length > 1 ? parts.slice(1).join(" ") : "";
 }
 
 function getChatId(message) {
@@ -275,12 +301,88 @@ function buildConfirmationMessage(payload) {
     ].join("\n");
 }
 
-function formatAppsScriptResult(result, payload) {
+function buildTableEntry(file, payload) {
+    if (!file) return null;
+
+    const id = file.spreadsheet_id || file.id || null;
+    if (!id) return null;
+
+    return {
+        spreadsheet_id: id,
+        name: file.name || file.title || `Table_${id.slice(0, 6)}`,
+        url: file.url || file.spreadsheet_url || "",
+        report_type: payload?.report_type || "unknown",
+        created_at: new Date().toISOString()
+    };
+}
+
+function mergeTables(existingTables = [], newEntries = []) {
+    const map = new Map();
+
+    existingTables.forEach((item) => {
+        if (item?.spreadsheet_id) {
+            map.set(item.spreadsheet_id, item);
+        }
+    });
+
+    newEntries.forEach((item) => {
+        if (item?.spreadsheet_id) {
+            map.set(item.spreadsheet_id, item);
+        }
+    });
+
+    return Array.from(map.values());
+}
+
+function resolveActiveTable(draft) {
+    const activeId = draft.activeTableId || draft.spreadsheet_id || null;
+    if (!activeId) return null;
+    return (draft.tables || []).find((item) => item.spreadsheet_id === activeId) || null;
+}
+
+function formatTablesList(draft) {
+    const tables = draft.tables || [];
+    if (tables.length === 0) {
+        return "Для цього Telegram акаунта ще немає таблиць у пам'яті бота.";
+    }
+
+    const activeId = draft.activeTableId || draft.spreadsheet_id || null;
+    const lines = ["Список таблиць:"];
+
+    tables.forEach((item, index) => {
+        const mark = item.spreadsheet_id === activeId ? " [ACTIVE]" : "";
+        lines.push(`${index + 1}. ${item.name}${mark}`);
+        lines.push(`   id: ${item.spreadsheet_id}`);
+        if (item.url) lines.push(`   url: ${item.url}`);
+    });
+
+    lines.push("Використай /use <номер або spreadsheet_id> для перемикання.");
+    return lines.join("\n");
+}
+
+function selectTableFromArg(draft, argRaw) {
+    const arg = normalizeText(argRaw);
+    if (!arg) return null;
+
+    const tables = draft.tables || [];
+    const byId = tables.find((item) => item.spreadsheet_id === arg);
+    if (byId) return byId;
+
+    const asNumber = Number(arg);
+    if (Number.isInteger(asNumber) && asNumber >= 1 && asNumber <= tables.length) {
+        return tables[asNumber - 1];
+    }
+
+    const lower = arg.toLowerCase();
+    return tables.find((item) => String(item.name || "").toLowerCase().includes(lower)) || null;
+}
+
+function formatAppsScriptResult(result, payload, draft) {
     const files = Array.isArray(result.files) ? result.files : [];
     const forms = Array.isArray(result.forms) ? result.forms : [];
     const firstFile = files[0] || {};
-
     const lines = ["Таблиця готова", ""];
+
     if (firstFile.name) lines.push(`Файл: ${firstFile.name}`);
     if (result.folder_url) lines.push(`Папка: ${result.folder_url}`);
     if (firstFile.url) lines.push(`Посилання на файл: ${firstFile.url}`);
@@ -295,21 +397,35 @@ function formatAppsScriptResult(result, payload) {
         forms.forEach((form) => lines.push(`Google Form ${form.name}: ${form.url}`));
     }
 
+    const active = resolveActiveTable(draft);
+    if (active) {
+        lines.push("", `Активна таблиця: ${active.name}`);
+        lines.push(`Active ID: ${active.spreadsheet_id}`);
+    }
+
     lines.push("", "Наступні кроки:");
     lines.push("1. Відкрий файл і перевір структуру");
     lines.push("2. Додай одну тестову операцію");
     if (payload.options?.counterparty_tracking) lines.push("3. Перевір дропдаун контрагентів");
-    lines.push("", "Для правок надішли update_table JSON або текст.");
+    lines.push("", "Для правок напиши текст або надішли update_table JSON.");
+    lines.push("Для списку таблиць: /tables");
 
     return lines.join("\n");
 }
 
-function formatLegacyResult(result) {
+function formatLegacyResult(result, draft) {
     const lines = ["Побудовано через legacy fallback.", ""];
     if (result.folder_url) lines.push(`Папка: ${result.folder_url}`);
     if (Array.isArray(result.generated_files)) {
         result.generated_files.forEach((f) => lines.push(`${f.title}: ${f.spreadsheet_url}`));
     }
+
+    const active = resolveActiveTable(draft);
+    if (active) {
+        lines.push("", `Активна таблиця: ${active.name}`);
+        lines.push(`Active ID: ${active.spreadsheet_id}`);
+    }
+
     lines.push("", "Налаштуй APPS_SCRIPT_URL, щоб основним був Apps Script.");
     return lines.join("\n");
 }
@@ -330,8 +446,8 @@ function buildWelcomeMessage() {
 
     return [
         "Привіт. Цей бот будує фінансові таблиці через Apps Script.",
-        "Надішли ТЗ у code-блоці з тегом tz: ```tz ...```",
-        "Команди: /clear /retry /status",
+        "Надішли ТЗ у code-блоці з тегом tz або просто текстом.",
+        "Команди: /clear /retry /status /tables /use /new",
         llmLine
     ].join("\n\n");
 }
@@ -344,13 +460,15 @@ function getBrandPhotoUrl() {
 
 function buildStatusMessage(draft) {
     const llm = getConfigSummary();
+    const active = resolveActiveTable(draft);
 
     return [
         `stage: ${draft.stage}`,
         `report_type: ${draft.report_type || "unknown"}`,
         `questions_left: ${Array.isArray(draft.questionsQueue) ? draft.questionsQueue.length : 0}`,
         `has_payload: ${draft.payload ? "yes" : "no"}`,
-        `spreadsheet_id: ${draft.spreadsheet_id || "-"}`,
+        `active_table_id: ${active?.spreadsheet_id || "-"}`,
+        `tables_count: ${(draft.tables || []).length}`,
         `legacy_fallback_used: ${draft.legacyFallbackUsed ? "yes" : "no"}`,
         `ai_enabled: ${llm.enabled ? "yes" : "no"}`,
         `ai_provider: ${llm.provider}`,
@@ -375,28 +493,53 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
 
     try {
         const build = await executeBuild(payload);
+        const nowDraft = getDraft(chatId);
 
         if (build.engine === "apps_script") {
-            const firstFile = (Array.isArray(build.result.files) ? build.result.files : [])[0] || {};
-            setDraft(chatId, {
-                ...getDraft(chatId),
+            const files = Array.isArray(build.result.files) ? build.result.files : [];
+            const entries = files.map((file) => buildTableEntry(file, payload)).filter(Boolean);
+            const mergedTables = mergeTables(nowDraft.tables, entries);
+            const activeId = entries[0]?.spreadsheet_id || nowDraft.activeTableId || null;
+
+            const updatedDraft = {
+                ...nowDraft,
                 stage: STAGES.EDITING,
                 payload,
-                spreadsheet_id: firstFile.spreadsheet_id || null,
+                spreadsheet_id: activeId,
+                activeTableId: activeId,
+                tables: mergedTables,
                 legacyFallbackUsed: false
-            });
-            await sendMessage(chatId, formatAppsScriptResult(build.result, payload));
+            };
+            setDraft(chatId, updatedDraft);
+
+            await sendMessage(chatId, formatAppsScriptResult(build.result, payload, updatedDraft));
             return { handled: true, command: commandLabel, engine: "apps_script", result: build.result };
         }
 
-        setDraft(chatId, {
-            ...getDraft(chatId),
+        const legacyFiles = Array.isArray(build.result.generated_files) ? build.result.generated_files : [];
+        const legacyEntries = legacyFiles
+            .map((file) => buildTableEntry({
+                spreadsheet_id: file.spreadsheet_id || file.id || null,
+                name: file.title || file.name,
+                url: file.spreadsheet_url || file.url
+            }, payload))
+            .filter(Boolean);
+
+        const mergedTables = mergeTables(nowDraft.tables, legacyEntries);
+        const activeId = legacyEntries[0]?.spreadsheet_id || nowDraft.activeTableId || null;
+
+        const updatedDraft = {
+            ...nowDraft,
             stage: STAGES.EDITING,
             payload,
-            spreadsheet_id: null,
+            spreadsheet_id: activeId,
+            activeTableId: activeId,
+            tables: mergedTables,
             legacyFallbackUsed: true
-        });
-        await sendMessage(chatId, formatLegacyResult(build.result));
+        };
+        setDraft(chatId, updatedDraft);
+
+        await sendMessage(chatId, formatLegacyResult(build.result, updatedDraft));
         return { handled: true, command: commandLabel, engine: "legacy", result: build.result };
     } catch (error) {
         setDraft(chatId, { ...getDraft(chatId), stage: STAGES.CONFIRMING, lastPayload: payload });
@@ -428,6 +571,24 @@ async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) 
     }
 }
 
+async function parseTzFromAnyText(message, chatId) {
+    const parsed = parseTzFromTelegramMessage(message);
+    if (parsed.detected && parsed.parsed) {
+        return parsed.tz;
+    }
+
+    if (!isLlmEnabled()) {
+        return null;
+    }
+
+    try {
+        return await generateTzFromFreeText(message.text || "");
+    } catch (error) {
+        await sendMessage(chatId, `Не зміг розпізнати ТЗ навіть через AI: ${error.message}`);
+        return null;
+    }
+}
+
 async function handleTzCapture(message, draft) {
     const chatId = message.chat.id;
     const text = normalizeText(message.text);
@@ -453,28 +614,23 @@ async function handleTzCapture(message, draft) {
         return { handled: true, command: "json_payload_confirm" };
     }
 
-    const tzParsed = parseTzFromTelegramMessage(message);
-    if (!tzParsed.detected) {
-        await sendMessage(chatId, "Надішли ТЗ у tz code block або JSON payload.");
+    const tz = await parseTzFromAnyText(message, chatId);
+    if (!tz) {
+        await sendMessage(chatId, "Надішли ТЗ у tz code block, JSON або просто текст з описом процесу.");
         return { handled: true, command: "awaiting_tz" };
     }
 
-    if (!tzParsed.parsed) {
-        await sendMessage(chatId, "Не зміг розпарсити ТЗ. Перевір ключі та відступи.");
-        return { handled: true, command: "tz_invalid" };
-    }
-
-    const analysis = analyzeArchitecture(tzParsed.tz);
-    const questionsQueue = buildQuestionQueue(tzParsed.tz, analysis);
-    const aiBundle = await buildClarificationWithAi(chatId, tzParsed.tz, analysis, questionsQueue);
+    const analysis = analyzeArchitecture(tz);
+    const questionsQueue = buildQuestionQueue(tz, analysis);
+    const aiBundle = await buildClarificationWithAi(chatId, tz, analysis, questionsQueue);
     const pendingQuestions = nextQuestionBatch(aiBundle.questions);
 
     setDraft(chatId, {
         ...draft,
         stage: STAGES.COLLECTING,
-        report_type: String(tzParsed.tz.report_type || "cashflow").toLowerCase(),
+        report_type: String(tz.report_type || "cashflow").toLowerCase(),
         raw_input: text,
-        extracted: tzParsed.tz,
+        extracted: tz,
         analysis,
         questionsQueue: aiBundle.questions,
         pendingQuestions,
@@ -536,29 +692,35 @@ async function handleConfirmation(message, draft) {
 }
 
 function buildUpdatePayloadFromTextFallback(text, draft) {
-    if (!draft.spreadsheet_id) return null;
+    const active = resolveActiveTable(draft);
+    const spreadsheetId = draft.spreadsheet_id || active?.spreadsheet_id || draft.activeTableId || null;
+    if (!spreadsheetId) return null;
+
     const normalized = normalizeText(text);
     if (!normalized) return null;
 
     return {
         action: "update_table",
-        spreadsheet_id: draft.spreadsheet_id,
+        spreadsheet_id: spreadsheetId,
         changes: [{ type: "add_article", section: "outflows", article: normalized }]
     };
 }
 
 async function buildUpdatePayloadWithAi(chatId, text, draft) {
-    if (!isLlmEnabled() || !draft.spreadsheet_id) {
+    const active = resolveActiveTable(draft);
+    const spreadsheetId = draft.spreadsheet_id || active?.spreadsheet_id || draft.activeTableId || null;
+
+    if (!isLlmEnabled() || !spreadsheetId) {
         return {
             missing: [],
             message_to_user: "",
-            update_payload: buildUpdatePayloadFromTextFallback(text, draft)
+            update_payload: buildUpdatePayloadFromTextFallback(text, { ...draft, spreadsheet_id: spreadsheetId })
         };
     }
 
     try {
         return await generateUpdatePayloadFromText({
-            spreadsheet_id: draft.spreadsheet_id,
+            spreadsheet_id: spreadsheetId,
             current_payload: draft.payload,
             user_message: text
         });
@@ -567,7 +729,7 @@ async function buildUpdatePayloadWithAi(chatId, text, draft) {
         return {
             missing: [],
             message_to_user: "",
-            update_payload: buildUpdatePayloadFromTextFallback(text, draft)
+            update_payload: buildUpdatePayloadFromTextFallback(text, { ...draft, spreadsheet_id: spreadsheetId })
         };
     }
 }
@@ -605,6 +767,46 @@ async function handleEditingMode(message, draft) {
     return { handled: true, command: "editing_auto_update" };
 }
 
+async function handleUseCommand(message, draft, argRaw) {
+    const chatId = message.chat.id;
+    const selected = selectTableFromArg(draft, argRaw);
+
+    if (!selected) {
+        await sendMessage(chatId, "Не знайшов таблицю. Використай /tables і потім /use <номер або spreadsheet_id>.");
+        return { handled: true, command: "use_not_found" };
+    }
+
+    setDraft(chatId, {
+        ...draft,
+        activeTableId: selected.spreadsheet_id,
+        spreadsheet_id: selected.spreadsheet_id,
+        stage: STAGES.EDITING
+    });
+
+    await sendMessage(chatId, `Активна таблиця: ${selected.name}\nID: ${selected.spreadsheet_id}`);
+    return { handled: true, command: "use_table" };
+}
+
+async function handleNewCommand(message, draft) {
+    const chatId = message.chat.id;
+
+    setDraft(chatId, {
+        ...draft,
+        stage: STAGES.IDLE,
+        report_type: null,
+        raw_input: "",
+        extracted: {},
+        clarifications: [],
+        payload: null,
+        answers: {},
+        questionsQueue: [],
+        pendingQuestions: []
+    });
+
+    await sendMessage(chatId, "Ок, починаємо нову таблицю. Надішли нове ТЗ (можна звичайним текстом).\nАктивну таблицю для правок можна змінити через /use.");
+    return { handled: true, command: "new_flow" };
+}
+
 async function handleTelegramUpdate(update) {
     const message = extractMessage(update);
     if (!message || !message.chat) return { handled: false, reason: "No message context" };
@@ -612,18 +814,33 @@ async function handleTelegramUpdate(update) {
     const chatId = getChatId(message);
     if (!chatId) return { handled: false, reason: "No chat id" };
 
-    const command = extractCommand(message.text || "");
+    const text = message.text || "";
+    const command = extractCommand(text);
+    const commandArg = extractCommandArg(text);
     const draft = getDraft(chatId);
 
     if (command === "/clear") {
         clearDraft(chatId);
-        await sendMessage(chatId, "Стан очищено. Надішли новий ТЗ у tz code block.");
+        await sendMessage(chatId, "Стан очищено. Надішли новий ТЗ у tz code block або простим текстом.");
         return { handled: true, command };
     }
 
     if (command === "/status") {
         await sendMessage(chatId, buildStatusMessage(draft));
         return { handled: true, command };
+    }
+
+    if (command === "/tables") {
+        await sendMessage(chatId, formatTablesList(draft));
+        return { handled: true, command };
+    }
+
+    if (command === "/use") {
+        return handleUseCommand(message, draft, commandArg);
+    }
+
+    if (command === "/new") {
+        return handleNewCommand(message, draft);
     }
 
     if (command === "/retry") {
@@ -658,10 +875,17 @@ async function handleTelegramUpdate(update) {
         return handleEditingMode(message, draft);
     }
 
+    if (!command && resolveActiveTable(draft) && /(додай|видали|перейменуй|change|remove|rename|add)/i.test(text)) {
+        return handleEditingMode(message, {
+            ...draft,
+            stage: STAGES.EDITING,
+            spreadsheet_id: resolveActiveTable(draft)?.spreadsheet_id || draft.spreadsheet_id
+        });
+    }
+
     return handleTzCapture(message, draft);
 }
 
 module.exports = {
     handleTelegramUpdate
 };
-
