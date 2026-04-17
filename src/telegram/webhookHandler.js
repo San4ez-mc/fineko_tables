@@ -119,6 +119,49 @@ function normalizeText(value) {
     return String(value || "").trim();
 }
 
+function looksLikeCashflowRequest(text) {
+    return /(кешфлоу|кеш\s*флоу|кефлоу|cashflow|cash\s*flow)/i.test(String(text || ""));
+}
+
+function parseArticlesFromLine(line) {
+    const source = String(line || "");
+    const parts = source.includes(":") ? source.split(":").slice(1).join(":") : source;
+    return parts
+        .split(/[;,]/)
+        .map((item) => normalizeText(item))
+        .filter((item) => item.length > 2)
+        .map((item) => item.replace(/^[-–]\s*/, ""));
+}
+
+function parseCashflowHeuristicFromText(text) {
+    const source = String(text || "");
+    if (!looksLikeCashflowRequest(source)) return null;
+
+    const lines = source.split(/\r?\n/).map((line) => normalizeText(line)).filter(Boolean);
+    const inflowLine = lines.find((line) => /(гроші\s*приход|надход|приходять|дохід|оплат)/i.test(line)) || "";
+    const outflowLine = lines.find((line) => /(витрат|закуп|зарплат|оренд|податк|комунал)/i.test(line)) || "";
+
+    let inflows = parseArticlesFromLine(inflowLine);
+    let outflows = parseArticlesFromLine(outflowLine);
+
+    if (inflows.length === 0) inflows = ["Оплата від клієнтів"];
+    if (outflows.length === 0) outflows = ["Операційні витрати"];
+
+    const toItems = (arr) => arr.map((article) => ({
+        article,
+        responsible: "Owner",
+        ops_per_month: 20,
+        has_sheets_access: true
+    }));
+
+    return {
+        report_type: "cashflow",
+        business_name: "Бізнес",
+        inflows: toItems(inflows),
+        outflows: toItems(outflows)
+    };
+}
+
 function spreadsheetUrlById(spreadsheetId) {
     const id = normalizeText(spreadsheetId);
     return id ? `https://docs.google.com/spreadsheets/d/${id}/edit` : "";
@@ -742,6 +785,11 @@ async function parseTzFromAnyText(message, chatId, draft) {
     const parsed = parseTzFromTelegramMessage(message);
     if (parsed.detected && parsed.parsed) {
         return parsed.tz;
+    }
+
+    const heuristicCashflow = parseCashflowHeuristicFromText(message.text || "");
+    if (heuristicCashflow) {
+        return heuristicCashflow;
     }
 
     if (!shouldUseAi(draft)) {
