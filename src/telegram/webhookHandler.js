@@ -41,6 +41,7 @@ function getDraft(chatId) {
         activeTableName: null,
         askedQuestionsCount: 0,
         businessNameResolved: null,
+        aiTemporarilyDisabled: false,
         updatedAt: new Date().toISOString()
     };
 }
@@ -72,8 +73,19 @@ function clearDraft(chatId) {
         activeTableName: null,
         askedQuestionsCount: 0,
         businessNameResolved: null,
+        aiTemporarilyDisabled: false,
         updatedAt: new Date().toISOString()
     });
+}
+
+function shouldUseAi(draft) {
+    return isLlmEnabled() && !draft?.aiTemporarilyDisabled;
+}
+
+function disableAiForChat(chatId, draft, reason) {
+    if (!draft || draft.aiTemporarilyDisabled) return;
+    setDraft(chatId, { ...draft, aiTemporarilyDisabled: true });
+    console.error("AI disabled for chat due to error", { chatId, reason: String(reason || "unknown") });
 }
 
 function extractMessage(update) {
@@ -529,6 +541,7 @@ function buildStatusMessage(draft) {
         `active_table_name: ${draft.activeTableName || "-"}`,
         `legacy_fallback_used: ${draft.legacyFallbackUsed ? "yes" : "no"}`,
         `ai_enabled: ${llm.enabled ? "yes" : "no"}`,
+        `ai_temporarily_disabled: ${draft.aiTemporarilyDisabled ? "yes" : "no"}`,
         `ai_provider: ${llm.provider}`,
         `ai_model: ${llm.model}`
     ].join("\n");
@@ -677,7 +690,8 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
 }
 
 async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) {
-    if (!isLlmEnabled()) {
+    const currentDraft = getDraft(chatId);
+    if (!shouldUseAi(currentDraft)) {
         return {
             message: buildArchitectureMessage(analysis),
             questions: defaultQuestions
@@ -693,7 +707,7 @@ async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) 
             questions: limitedQuestions
         };
     } catch (error) {
-        await sendMessage(chatId, `AI тимчасово недоступний, працюю без нього: ${error.message}`);
+        disableAiForChat(chatId, currentDraft, error?.message);
         const questionBudget = Math.max(0, MAX_TOTAL_QUESTIONS - Number(getDraft(chatId).askedQuestionsCount || 0));
         return {
             message: buildArchitectureMessage(analysis),
@@ -702,33 +716,34 @@ async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) 
     }
 }
 
-async function parseTzFromAnyText(message, chatId) {
+async function parseTzFromAnyText(message, chatId, draft) {
     const parsed = parseTzFromTelegramMessage(message);
     if (parsed.detected && parsed.parsed) {
         return parsed.tz;
     }
 
-    if (!isLlmEnabled()) {
+    if (!shouldUseAi(draft)) {
         return null;
     }
 
     try {
         return await generateTzFromFreeText(message.text || "");
     } catch (error) {
-        await sendMessage(chatId, `Не зміг розпізнати ТЗ навіть через AI: ${error.message}`);
+        disableAiForChat(chatId, draft, error?.message);
         return null;
     }
 }
 
-async function resolveBusinessName(tz, rawText, message) {
+async function resolveBusinessName(tz, rawText, message, draft, chatId) {
     const fromTz = normalizeText(tz?.business_name);
     if (fromTz) return fromTz;
 
-    if (isLlmEnabled()) {
+    if (shouldUseAi(draft)) {
         try {
             const aiName = normalizeText(await generateBusinessNameFromText(rawText || ""));
             if (aiName) return aiName;
-        } catch {
+        } catch (error) {
+            disableAiForChat(chatId, draft, error?.message);
             // fallback to telegram username below
         }
     }
@@ -806,14 +821,14 @@ async function handleTzCapture(message, draft) {
         return { handled: true, command: "json_payload_confirm" };
     }
 
-    const tz = await parseTzFromAnyText(message, chatId);
+    const tz = await parseTzFromAnyText(message, chatId, draft);
     if (!tz) {
         await sendMessage(chatId, "Надішли ТЗ у tz code block, JSON або просто текст з описом процесу.");
         return { handled: true, command: "awaiting_tz" };
     }
 
     const analysis = analyzeArchitecture(tz);
-    const businessNameResolved = await resolveBusinessName(tz, text, message);
+    const businessNameResolved = await resolveBusinessName(tz, text, message, draft, chatId);
     const questionsQueue = buildQuestionQueue(tz, analysis, draft.askedQuestionsCount);
     const aiBundle = await buildClarificationWithAi(chatId, tz, analysis, questionsQueue);
     const pendingQuestions = nextQuestionBatch(aiBundle.questions);
@@ -934,7 +949,7 @@ async function buildUpdatePayloadWithAi(chatId, text, draft) {
     const active = resolveActiveTable(draft);
     const spreadsheetId = draft.spreadsheet_id || active?.spreadsheet_id || draft.activeTableId || null;
 
-    if (!isLlmEnabled() || !spreadsheetId) {
+    if (!shouldUseAi(draft) || !spreadsheetId) {
         return {
             missing: [],
             message_to_user: "",
@@ -949,7 +964,7 @@ async function buildUpdatePayloadWithAi(chatId, text, draft) {
             user_message: text
         });
     } catch (error) {
-        await sendMessage(chatId, `AI редагування недоступне, використовую fallback: ${error.message}`);
+        disableAiForChat(chatId, draft, error?.message);
         return {
             missing: [],
             message_to_user: "",
@@ -1037,6 +1052,7 @@ async function handleNewCommand(message, draft) {
         pendingQuestions: [],
         askedQuestionsCount: 0,
         businessNameResolved: null,
+        aiTemporarilyDisabled: false,
         activeTableId: draft.activeTableId || null,
         activeTableName: draft.activeTableName || null,
         spreadsheet_id: draft.activeTableId || null
