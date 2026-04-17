@@ -174,7 +174,11 @@ async function generateClarificationBundle(context) {
         "You are a finance table assistant for Telegram.",
         "Return only JSON.",
         "Use concise Ukrainian text without markdown.",
-        "Ask only critical missing questions for table build."
+        "Ask only critical missing questions for table build.",
+        "Group related topics into one question.",
+        "Each message must include at most 3-4 grouped questions.",
+        "Include an example answer format in message.",
+        "Respect total question budget from context.questionBudget."
     ].join(" ");
 
     const userPrompt = `Context JSON:\n${JSON.stringify(context, null, 2)}\n\nReturn JSON:\n{\n  \"message\": \"short user-facing summary\",\n  \"questions\": [{\"key\":\"...\",\"text\":\"...\"}]\n}`;
@@ -191,6 +195,21 @@ async function generateClarificationBundle(context) {
                 .filter((item) => item.key && item.text)
             : []
     };
+}
+
+async function generateBusinessNameFromText(input) {
+    const systemPrompt = [
+        "You generate a short business name from user description.",
+        "Return only JSON.",
+        "Name must be Ukrainian and 3-4 words max.",
+        "No quotes, no punctuation at edges."
+    ].join(" ");
+
+    const userPrompt = `Business description:\n${String(input || "")}\n\nReturn JSON:\n{\n  "business_name": "..."\n}`;
+
+    const data = await callJsonTask({ systemPrompt, userPrompt });
+    const name = String(data.business_name || "").trim();
+    return name;
 }
 
 async function generateUpdatePayloadFromText(input) {
@@ -235,5 +254,6 @@ module.exports = {
     getConfigSummary,
     generateClarificationBundle,
     generateUpdatePayloadFromText,
-    generateTzFromFreeText
+    generateTzFromFreeText,
+    generateBusinessNameFromText
 };

@@ -1,5 +1,17 @@
 var ROOT_FOLDER_NAME = 'Фінансова система — Курс';
 var DEFAULT_SHARE_MODE = 'anyone_with_link';
+var THEME = {
+  HEADER_BG: '#1A56DB',
+  HEADER_TEXT: '#FFFFFF',
+  LOCKED_BG: '#F0F9F9',
+  LOCKED_TEXT: '#0D4A4D',
+  INPUT_BG: '#FFFFFF',
+  ALT_ROW_BG: '#F5F5F5',
+  TOTAL_BG: '#E6F4EC',
+  TOTAL_TEXT: '#0E7C3A',
+  WARN_BG: '#FEF2F2',
+  WARN_TEXT: '#B91C1C'
+};
 
 function doPost(e) {
   try {
@@ -14,6 +26,8 @@ function doPost(e) {
         return updateTable(payload);
       case 'list_tables':
         return listTables(payload);
+      case 'validate_table':
+        return validateTableAction(payload);
       default:
         return respond({ status: 'error', message: 'unknown action: ' + payload.action });
     }
@@ -66,6 +80,10 @@ function buildTable(payload) {
       buildBalance_(context);
     } else {
       buildDashboard_(context);
+    }
+
+    if (payload.options && payload.options.formatting) {
+      applyWorkbookTheme_(ss);
     }
 
     setPermissions(clientFolder, file, payload.user_email, payload.share_mode || DEFAULT_SHARE_MODE);
@@ -177,6 +195,66 @@ function updateTable(payload) {
   }
 
   return respond({ status: 'ok', changes_applied: results });
+}
+
+function validateTableAction(payload) {
+  if (!payload.spreadsheet_id) {
+    return respond({ status: 'error', message: 'spreadsheet_id is required' });
+  }
+
+  var ss = SpreadsheetApp.openById(payload.spreadsheet_id);
+  var errors = [];
+  var warnings = [];
+  var names = ss.getSheets().map(function(s) { return s.getName(); });
+
+  if (names.length === 0) {
+    errors.push('Файл не містить аркушів');
+  }
+
+  var requiredByType = ['articles_inflows', 'articles_outflows'];
+  var namedRanges = ss.getNamedRanges();
+  requiredByType.forEach(function(name) {
+    var nr = namedRanges.find(function(r) { return r.getName() === name; });
+    if (!nr) {
+      warnings.push('Відсутній named range: ' + name);
+      return;
+    }
+    if (nr.getRange().isBlank()) {
+      warnings.push('Named range порожній: ' + name);
+    }
+  });
+
+  var mainSheet = ss.getSheetByName('📊 Cashflow') || ss.getSheetByName('📊 P&L') || ss.getSheets()[0];
+  if (!mainSheet) {
+    errors.push('Не знайдено зведений аркуш');
+  } else {
+    var dataRange = mainSheet.getDataRange();
+    var formulas = dataRange.getFormulas().reduce(function(acc, row) { return acc.concat(row); }, []).filter(function(v) { return v !== ''; });
+    if (formulas.length === 0) {
+      errors.push('Зведений аркуш не містить формул');
+    }
+
+    var values = dataRange.getDisplayValues().reduce(function(acc, row) { return acc.concat(row); }, []);
+    var broken = values.filter(function(v) {
+      return typeof v === 'string' && (/^#REF!|^#ERROR!|^#NAME\?/).test(v);
+    });
+    if (broken.length > 0) {
+      errors.push('Зламані формули: ' + broken.slice(0, 5).join(', '));
+    }
+  }
+
+  var protections = ss.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+  if (!protections || protections.length === 0) {
+    warnings.push('Зведений аркуш не захищений від редагування');
+  }
+
+  return respond({
+    status: 'ok',
+    valid: errors.length === 0,
+    errors: errors,
+    warnings: warnings,
+    sheets_found: names
+  });
 }
 
 function validatePayload(payload) {
@@ -598,6 +676,50 @@ function protectHeader_(sheet) {
   var protection = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 5)).protect();
   protection.setDescription('Protect headers');
   protection.setWarningOnly(false);
+}
+
+function applyWorkbookTheme_(ss) {
+  var sheets = ss.getSheets();
+
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    var maxCols = Math.max(sheet.getLastColumn(), 5);
+    var maxRows = Math.max(sheet.getLastRow(), 2);
+
+    var header = sheet.getRange(1, 1, 1, maxCols);
+    header.setBackground(THEME.HEADER_BG);
+    header.setFontColor(THEME.HEADER_TEXT);
+    header.setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.setRowHeight(1, 32);
+
+    if (maxRows > 1) {
+      var inputRange = sheet.getRange(2, 1, maxRows - 1, maxCols);
+      inputRange.setBackground(THEME.INPUT_BG);
+
+      for (var row = 2; row <= maxRows; row++) {
+        if (row % 2 === 0) {
+          sheet.getRange(row, 1, 1, maxCols).setBackground(THEME.ALT_ROW_BG);
+        }
+      }
+    }
+
+    var lastCol = sheet.getLastColumn();
+    var lastRow = sheet.getLastRow();
+    if (lastCol > 0 && lastRow > 2) {
+      var values = sheet.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+      for (var r = 1; r <= lastRow; r++) {
+        var firstCell = String(values[r - 1][0] || '').toLowerCase();
+        if (firstCell.indexOf('загальні') >= 0 || firstCell.indexOf('чистий') >= 0 || firstCell.indexOf('залишок') >= 0) {
+          var totalRow = sheet.getRange(r, 1, 1, lastCol);
+          totalRow.setBackground(THEME.TOTAL_BG);
+          totalRow.setFontColor(THEME.TOTAL_TEXT);
+          totalRow.setFontWeight('bold');
+          totalRow.setBorder(true, null, null, null, null, null, '#0E7C3A', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+        }
+      }
+    }
+  }
 }
 
 function addArticle_(ss, change) {

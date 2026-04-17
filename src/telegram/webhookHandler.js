@@ -1,5 +1,5 @@
 ﻿const { buildReports } = require("../google/reportBuilder");
-const { buildTableViaAppsScript, updateTableViaAppsScript, listTablesViaAppsScript } = require("../google/appsScriptClient");
+const { buildTableViaAppsScript, updateTableViaAppsScript, listTablesViaAppsScript, validateTableViaAppsScript } = require("../google/appsScriptClient");
 const { sendMessage, sendPhoto } = require("./bot");
 const { parseTzFromTelegramMessage, analyzeArchitecture } = require("./tzParser");
 const {
@@ -7,10 +7,12 @@ const {
     getConfigSummary,
     generateClarificationBundle,
     generateUpdatePayloadFromText,
-    generateTzFromFreeText
+    generateTzFromFreeText,
+    generateBusinessNameFromText
 } = require("../ai/agentBrain");
 
 const DRAFTS = new Map();
+const MAX_TOTAL_QUESTIONS = 15;
 
 const STAGES = {
     IDLE: "idle",
@@ -37,6 +39,8 @@ function getDraft(chatId) {
         legacyFallbackUsed: false,
         activeTableId: null,
         activeTableName: null,
+        askedQuestionsCount: 0,
+        businessNameResolved: null,
         updatedAt: new Date().toISOString()
     };
 }
@@ -66,6 +70,8 @@ function clearDraft(chatId) {
         legacyFallbackUsed: false,
         activeTableId: null,
         activeTableName: null,
+        askedQuestionsCount: 0,
+        businessNameResolved: null,
         updatedAt: new Date().toISOString()
     });
 }
@@ -183,33 +189,63 @@ function buildArchitectureMessage(analysis) {
     ].join("\n");
 }
 
-function buildQuestionQueue(tz, analysis) {
-    const questions = [
-        { key: "google_email", text: "1) Вкажи Google email для доступу редактора" },
-        { key: "business_name", text: `2) Підтверди назву бізнесу (зараз: ${tz.business_name || "Business"})` }
-    ];
+function hasAtLeastOneArticle(tz) {
+    const inflows = Array.isArray(tz?.inflows) ? tz.inflows : [];
+    const outflows = Array.isArray(tz?.outflows) ? tz.outflows : [];
+    return inflows.length + outflows.length > 0;
+}
 
-    if (String(tz.report_type || "").toLowerCase() === "cashflow") {
-        questions.push({ key: "include_payment_calendar", text: "3) Додати Платіжний календар? (так/ні)" });
-    }
+function normalizeReportType(value) {
+    const text = normalizeText(value).toLowerCase();
+    const allowed = ["cashflow", "pl", "balance", "dashboard"];
+    return allowed.includes(text) ? text : "";
+}
 
-    for (const person of analysis.noAccessPeople) {
+function findNoAccessItemsWithoutMode(tz) {
+    const all = [...(Array.isArray(tz?.inflows) ? tz.inflows : []), ...(Array.isArray(tz?.outflows) ? tz.outflows : [])];
+    return all
+        .filter((item) => item && item.has_sheets_access === false)
+        .filter((item) => !normalizeText(item.input_mode));
+}
+
+function buildQuestionQueue(tz, _analysis, askedQuestionsCount = 0) {
+    const questions = [];
+
+    if (!normalizeReportType(tz.report_type)) {
         questions.push({
-            key: `no_access_method_${person.name}`,
-            text: `${person.name} без доступу до Sheets. Обрати Google Form чи окремий аркуш?`
+            key: "report_type",
+            text: "Вкажи тип таблиці: cashflow / pl / balance / dashboard"
         });
     }
 
-    questions.push(
-        { key: "bank_accounts", text: "Є кілька банківських рахунків? (так/ні)" },
-        { key: "counterparties", text: "Потрібен облік по контрагентах? (так/ні)" }
-    );
+    if (!hasAtLeastOneArticle(tz)) {
+        questions.push({
+            key: "articles_seed",
+            text: "Дай мінімум 1-2 статті (формат: Надходження: ..., Витрати: ...)"
+        });
+    }
 
-    return questions;
+    const unresolvedNoAccess = findNoAccessItemsWithoutMode(tz);
+    unresolvedNoAccess.forEach((item, index) => {
+        const person = normalizeText(item.responsible || item.owner || "Співробітник");
+        const article = normalizeText(item.article || item.name || "Стаття");
+        questions.push({
+            key: `money_flow_${index}`,
+            text: `${article} — ${person}: сам платить (підзвіт) чи заявка через бухгалтера?`
+        });
+        questions.push({
+            key: `no_access_method_${index}`,
+            text: `${article} — якщо підзвіт, що зручніше: Google Form чи окремий аркуш?`
+        });
+    });
+
+    const budgetLeft = Math.max(0, MAX_TOTAL_QUESTIONS - Number(askedQuestionsCount || 0));
+    return questions.slice(0, budgetLeft);
 }
 
 function buildResponsibleMap(tz, answers = {}) {
     const result = {};
+    let noAccessIndex = 0;
 
     const addItem = (item) => {
         const article = normalizeText(item.article || item.name);
@@ -218,17 +254,31 @@ function buildResponsibleMap(tz, answers = {}) {
         const person = normalizeText(item.responsible || item.owner || "Owner");
         const hasAccess = item.has_sheets_access !== false;
         let inputMode = hasAccess ? "direct" : "sheet";
+        let payment = hasAccess ? "centralized" : "accountable";
 
         if (!hasAccess) {
-            const decision = normalizeText(answers[`no_access_method_${person}`]).toLowerCase();
-            if (decision.includes("form") || decision.includes("гугл форм")) inputMode = "form";
+            const flowDecision = normalizeText(answers[`money_flow_${noAccessIndex}`]).toLowerCase();
+            const methodDecision = normalizeText(answers[`no_access_method_${noAccessIndex}`]).toLowerCase();
+
+            if (flowDecision.includes("бух") || flowDecision.includes("accountant") || flowDecision.includes("через")) {
+                inputMode = "direct";
+                payment = "centralized";
+            } else if (methodDecision.includes("form") || methodDecision.includes("гугл форм")) {
+                inputMode = "form";
+                payment = "accountable";
+            } else {
+                inputMode = "sheet";
+                payment = "accountable";
+            }
+
+            noAccessIndex += 1;
         }
 
         result[article] = {
             name: person,
             access: hasAccess,
             input_mode: inputMode,
-            payment: hasAccess ? "centralized" : "accountable"
+            payment
         };
     };
 
@@ -252,10 +302,9 @@ function buildPayloadFromTzDraft(draft, message) {
 
     return {
         action: "build_table",
-        report_type: String(tz.report_type || "cashflow").toLowerCase(),
-        business_name: normalizeText(answers.business_name || tz.business_name || "Business"),
+        report_type: normalizeReportType(answers.report_type || tz.report_type) || "cashflow",
+        business_name: normalizeText(draft.businessNameResolved || tz.business_name || identity.telegram_username || "Business"),
         language: "uk",
-        user_email: normalizeText(answers.google_email),
         telegram_id: identity.telegram_id,
         telegram_username: identity.telegram_username,
         raw_input: draft.raw_input,
@@ -266,9 +315,10 @@ function buildPayloadFromTzDraft(draft, message) {
         articles: { inflows, outflows },
         responsible: buildResponsibleMap(tz, answers),
         options: {
-            payment_calendar: asYesNo(answers.include_payment_calendar),
-            multi_account: asYesNo(answers.bank_accounts),
-            counterparty_tracking: asYesNo(answers.counterparties)
+            payment_calendar: false,
+            multi_account: false,
+            counterparty_tracking: false,
+            formatting: true
         }
     };
 }
@@ -293,7 +343,6 @@ function buildConfirmationMessage(payload) {
     return [
         "Готовий будувати.",
         `Файл: ${payload.report_type}_${payload.business_name}_${new Date().getFullYear()}`,
-        `Email доступу: ${payload.user_email || "не вказано"}`,
         `Аркуші: ${inferSheetsFromPayload(payload).join(", ")}`,
         `Надходження: ${(payload.articles?.inflows || []).join(", ") || "-"}`,
         `Витрати: ${(payload.articles?.outflows || []).join(", ") || "-"}`,
@@ -469,6 +518,7 @@ function buildStatusMessage(draft) {
         `stage: ${draft.stage}`,
         `report_type: ${draft.report_type || "unknown"}`,
         `questions_left: ${Array.isArray(draft.questionsQueue) ? draft.questionsQueue.length : 0}`,
+        `questions_asked: ${Number(draft.askedQuestionsCount || 0)} / ${MAX_TOTAL_QUESTIONS}`,
         `has_payload: ${draft.payload ? "yes" : "no"}`,
         `active_table_id: ${active?.spreadsheet_id || "-"}`,
         `active_table_name: ${draft.activeTableName || "-"}`,
@@ -515,7 +565,51 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
             };
             setDraft(chatId, updatedDraft);
 
-            await sendMessage(chatId, formatAppsScriptResult(build.result, payload, updatedDraft));
+            let validationResult = null;
+            if (activeId) {
+                try {
+                    validationResult = await validateTableViaAppsScript({ spreadsheet_id: activeId });
+                } catch (error) {
+                    validationResult = {
+                        valid: false,
+                        errors: [`Помилка validate_table: ${error.message}`],
+                        warnings: []
+                    };
+                }
+            }
+
+            if (validationResult && validationResult.valid === false) {
+                const lines = ["⚠️ Таблиця побудована, але є проблеми:"];
+                (validationResult.errors || []).forEach((item) => lines.push(`❌ ${item}`));
+                if (Array.isArray(validationResult.warnings) && validationResult.warnings.length > 0) {
+                    lines.push("", "Попередження:");
+                    validationResult.warnings.forEach((item) => lines.push(`⚠️ ${item}`));
+                }
+                lines.push("", "Спробуй /retry або напиши, що змінити.");
+                await sendMessage(chatId, lines.join("\n"));
+                return { handled: true, command: commandLabel, engine: "apps_script", result: build.result, validation: validationResult };
+            }
+
+            const firstFile = build.result.files?.[0] || {};
+            let msg = "Таблиця готова\n\n";
+            if (firstFile.name) msg += `${firstFile.name}\n`;
+            if (firstFile.url) msg += `${firstFile.url}\n`;
+
+            if (Array.isArray(build.result.forms) && build.result.forms.length > 0) {
+                build.result.forms.forEach((form) => {
+                    msg += `\nФорма для ${form.name}:\n${form.url}`;
+                });
+            }
+
+            if (validationResult?.warnings?.length) {
+                msg += "\n\nПопередження:";
+                validationResult.warnings.forEach((item) => {
+                    msg += `\n⚠️ ${item}`;
+                });
+            }
+
+            msg += "\n\nЯкщо треба щось змінити — просто напиши.";
+            await sendMessage(chatId, msg);
             return { handled: true, command: commandLabel, engine: "apps_script", result: build.result };
         }
 
@@ -560,16 +654,19 @@ async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) 
     }
 
     try {
-        const ai = await generateClarificationBundle({ tz, analysis, defaultQuestions });
+        const questionBudget = Math.max(0, MAX_TOTAL_QUESTIONS - Number(getDraft(chatId).askedQuestionsCount || 0));
+        const ai = await generateClarificationBundle({ tz, analysis, defaultQuestions, questionBudget });
+        const limitedQuestions = (ai.questions.length > 0 ? ai.questions : defaultQuestions).slice(0, questionBudget);
         return {
             message: ai.message || buildArchitectureMessage(analysis),
-            questions: ai.questions.length > 0 ? ai.questions : defaultQuestions
+            questions: limitedQuestions
         };
     } catch (error) {
         await sendMessage(chatId, `AI тимчасово недоступний, працюю без нього: ${error.message}`);
+        const questionBudget = Math.max(0, MAX_TOTAL_QUESTIONS - Number(getDraft(chatId).askedQuestionsCount || 0));
         return {
             message: buildArchitectureMessage(analysis),
-            questions: defaultQuestions
+            questions: defaultQuestions.slice(0, questionBudget)
         };
     }
 }
@@ -590,6 +687,67 @@ async function parseTzFromAnyText(message, chatId) {
         await sendMessage(chatId, `Не зміг розпізнати ТЗ навіть через AI: ${error.message}`);
         return null;
     }
+}
+
+async function resolveBusinessName(tz, rawText, message) {
+    const fromTz = normalizeText(tz?.business_name);
+    if (fromTz) return fromTz;
+
+    if (isLlmEnabled()) {
+        try {
+            const aiName = normalizeText(await generateBusinessNameFromText(rawText || ""));
+            if (aiName) return aiName;
+        } catch {
+            // fallback to telegram username below
+        }
+    }
+
+    return normalizeText(message?.from?.username || "Business");
+}
+
+function applyCriticalAnswerSideEffects(draft, updatedAnswers) {
+    const extracted = { ...(draft.extracted || {}) };
+    const answers = updatedAnswers || {};
+
+    const answeredType = normalizeReportType(answers.report_type);
+    if (answeredType) {
+        extracted.report_type = answeredType;
+    }
+
+    if (!hasAtLeastOneArticle(extracted) && normalizeText(answers.articles_seed)) {
+        const seed = answers.articles_seed;
+        const inflowMatch = String(seed).match(/надходження\s*:\s*([^\n]+)/i);
+        const outflowMatch = String(seed).match(/витрати\s*:\s*([^\n]+)/i);
+        const parseList = (value) => String(value || "")
+            .split(/[;,]/)
+            .map((v) => normalizeText(v))
+            .filter(Boolean)
+            .map((article) => ({ article, responsible: "Owner", ops_per_month: 10, has_sheets_access: true }));
+
+        const inflows = parseList(inflowMatch?.[1]);
+        const outflows = parseList(outflowMatch?.[1]);
+        if (inflows.length || outflows.length) {
+            extracted.inflows = inflows;
+            extracted.outflows = outflows;
+        }
+    }
+
+    return extracted;
+}
+
+function ensureBuildMinimum(tz) {
+    const next = { ...(tz || {}) };
+    if (!normalizeReportType(next.report_type)) {
+        next.report_type = "cashflow";
+    }
+
+    const inflows = Array.isArray(next.inflows) ? next.inflows : [];
+    const outflows = Array.isArray(next.outflows) ? next.outflows : [];
+    if (inflows.length + outflows.length === 0) {
+        next.outflows = [{ article: "Інші витрати", responsible: "Owner", ops_per_month: 10, has_sheets_access: true }];
+    }
+
+    return next;
 }
 
 async function handleTzCapture(message, draft) {
@@ -624,9 +782,31 @@ async function handleTzCapture(message, draft) {
     }
 
     const analysis = analyzeArchitecture(tz);
-    const questionsQueue = buildQuestionQueue(tz, analysis);
+    const businessNameResolved = await resolveBusinessName(tz, text, message);
+    const questionsQueue = buildQuestionQueue(tz, analysis, draft.askedQuestionsCount);
     const aiBundle = await buildClarificationWithAi(chatId, tz, analysis, questionsQueue);
     const pendingQuestions = nextQuestionBatch(aiBundle.questions);
+
+    if (aiBundle.questions.length === 0) {
+        const readyTz = ensureBuildMinimum(tz);
+        const directDraft = {
+            ...draft,
+            stage: STAGES.CONFIRMING,
+            report_type: normalizeReportType(readyTz.report_type) || "cashflow",
+            raw_input: text,
+            extracted: readyTz,
+            analysis: analyzeArchitecture(readyTz),
+            businessNameResolved,
+            answers: {},
+            questionsQueue: [],
+            pendingQuestions: []
+        };
+        const payload = buildPayloadFromTzDraft(directDraft, message);
+        setDraft(chatId, { ...directDraft, payload, lastPayload: payload });
+        await sendMessage(chatId, "Критичних уточнень немає або ліміт питань вичерпано. Переходимо до побудови.");
+        await sendMessage(chatId, buildConfirmationMessage(payload));
+        return { handled: true, command: "ready_without_questions" };
+    }
 
     setDraft(chatId, {
         ...draft,
@@ -635,8 +815,10 @@ async function handleTzCapture(message, draft) {
         raw_input: text,
         extracted: tz,
         analysis,
+        businessNameResolved,
         questionsQueue: aiBundle.questions,
         pendingQuestions,
+        askedQuestionsCount: Number(draft.askedQuestionsCount || 0) + pendingQuestions.length,
         answers: {},
         payload: null,
         history: [...(draft.history || []), { role: "user", content: text }]
@@ -653,11 +835,15 @@ async function handleTzCapture(message, draft) {
 async function handleCollectingAnswers(message, draft) {
     const chatId = message.chat.id;
     const updated = applyAnswers(draft, message.text || "");
+    const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.answers);
 
     const nextDraft = {
         ...draft,
         ...updated,
         stage: updated.pendingQuestions.length > 0 ? STAGES.COLLECTING : STAGES.CONFIRMING,
+        extracted: extractedAfterAnswers,
+        report_type: normalizeReportType(extractedAfterAnswers.report_type) || draft.report_type,
+        askedQuestionsCount: Number(draft.askedQuestionsCount || 0) + updated.pendingQuestions.length,
         clarifications: [...(draft.clarifications || []), normalizeText(message.text)]
     };
 
@@ -667,9 +853,13 @@ async function handleCollectingAnswers(message, draft) {
         return { handled: true, command: "clarify_answers" };
     }
 
-    const payload = buildPayloadFromTzDraft(nextDraft, message);
-    setDraft(chatId, { ...nextDraft, payload, lastPayload: payload });
-    await sendMessage(chatId, buildConfirmationMessage(payload));
+    const readyDraft = {
+        ...nextDraft,
+        extracted: ensureBuildMinimum(nextDraft.extracted)
+    };
+    const finalPayload = buildPayloadFromTzDraft(readyDraft, message);
+    setDraft(chatId, { ...readyDraft, payload: finalPayload, lastPayload: finalPayload });
+    await sendMessage(chatId, buildConfirmationMessage(finalPayload));
     return { handled: true, command: "ready_for_confirmation" };
 }
 
@@ -814,6 +1004,8 @@ async function handleNewCommand(message, draft) {
         answers: {},
         questionsQueue: [],
         pendingQuestions: [],
+        askedQuestionsCount: 0,
+        businessNameResolved: null,
         activeTableId: draft.activeTableId || null,
         activeTableName: draft.activeTableName || null,
         spreadsheet_id: draft.activeTableId || null
@@ -884,7 +1076,7 @@ async function handleTelegramUpdate(update) {
         return { handled: true, command };
     }
 
-    if (draft.stage === STAGES.COLLECTING && draft.pendingQuestions?.length) {
+    if (draft.stage === STAGES.COLLECTING && ((draft.pendingQuestions?.length || 0) > 0 || (draft.questionsQueue?.length || 0) > 0)) {
         return handleCollectingAnswers(message, draft);
     }
 

@@ -84,10 +84,18 @@ async function listTablesViaAppsScript(payload) {
     });
 }
 
+async function validateTableViaAppsScript(payload) {
+    return callAppsScript({
+        action: "validate_table",
+        ...(payload || {})
+    });
+}
+
 module.exports = {
     callAppsScript,
     pingAppsScript,
     buildTableViaAppsScript,
     updateTableViaAppsScript,
-    listTablesViaAppsScript
+    listTablesViaAppsScript,
+    validateTableViaAppsScript
 };
