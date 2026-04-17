@@ -121,10 +121,13 @@ function buildInstructionSheet(ss, payload) {
 }
 
 function checkFormulaErrors(sheet) {
-  var values = sheet.getDataRange().getDisplayValues();
+  var range = sheet.getDataRange();
+  var values = range.getDisplayValues();
+  var formulas = range.getFormulas();
   var errors = [];
   for (var r = 0; r < values.length; r++) {
     for (var c = 0; c < values[r].length; c++) {
+      if (!formulas[r][c]) continue;
       var cell = values[r][c];
       if (typeof cell === 'string' && (/^#REF!|^#ERROR!|^#NAME\?|^#VALUE!|^#DIV\/0!/).test(cell)) {
         errors.push({ sheet: sheet.getName(), cell: columnToLetter_(c + 1) + String(r + 1), value: cell });
@@ -391,10 +394,18 @@ function validateTableAction(payload) {
       errors.push('Зведений аркуш не містить формул');
     }
 
-    var values = dataRange.getDisplayValues().reduce(function(acc, row) { return acc.concat(row); }, []);
-    var broken = values.filter(function(v) {
-      return typeof v === 'string' && (/^#REF!|^#ERROR!|^#NAME\?/).test(v);
-    });
+    var values2d = dataRange.getDisplayValues();
+    var formulas2d = dataRange.getFormulas();
+    var broken = [];
+    for (var rr = 0; rr < values2d.length; rr++) {
+      for (var cc = 0; cc < values2d[rr].length; cc++) {
+        if (!formulas2d[rr][cc]) continue;
+        var cellValue = values2d[rr][cc];
+        if (typeof cellValue === 'string' && (/^#REF!|^#ERROR!|^#NAME\?/).test(cellValue)) {
+          broken.push(cellValue);
+        }
+      }
+    }
     if (broken.length > 0) {
       errors.push('Зламані формули: ' + broken.slice(0, 5).join(', '));
     }
