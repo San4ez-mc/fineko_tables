@@ -1,6 +1,18 @@
 var ROOT_FOLDER_NAME = 'Фінансова система — Курс';
 var DEFAULT_SHARE_MODE = 'anyone_with_link';
 var SETTINGS_SHEET_NAME = '⚙️ Налаштування';
+var INPUT_THEME = {
+  HEADER_BG: '#1A56DB',
+  HEADER_TEXT: '#FFFFFF',
+  ROW_ODD: '#FFFFFF',
+  ROW_EVEN: '#EBF2FF'
+};
+var FORMULA_THEME = {
+  HEADER_BG: '#B91C1C',
+  HEADER_TEXT: '#FFFFFF',
+  ROW_ODD: '#FFFFFF',
+  ROW_EVEN: '#FEE2E2'
+};
 var THEME = {
   HEADER_BG: '#1A56DB',
   HEADER_TEXT: '#FFFFFF',
@@ -13,6 +25,125 @@ var THEME = {
   WARN_BG: '#FEF2F2',
   WARN_TEXT: '#B91C1C'
 };
+
+function trimSheet(sheet, keepRows, keepCols) {
+  var maxRows = sheet.getMaxRows();
+  var maxCols = sheet.getMaxColumns();
+  if (maxRows > keepRows) sheet.deleteRows(keepRows + 1, maxRows - keepRows);
+  if (maxCols > keepCols) sheet.deleteColumns(keepCols + 1, maxCols - keepCols);
+}
+
+function autoResizeAllColumns(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  sheet.autoResizeColumns(1, lastCol);
+
+  var minByCol = { 1: 200, 2: 160, 3: 180, 4: 130, 5: 220 };
+  Object.keys(minByCol).forEach(function(col) {
+    var c = Number(col);
+    if (c <= lastCol && sheet.getColumnWidth(c) < minByCol[col]) {
+      sheet.setColumnWidth(c, minByCol[col]);
+    }
+  });
+}
+
+function applySheetBanding_(sheet, theme, keepRows, keepCols) {
+  var cols = Math.max(keepCols || sheet.getLastColumn(), 1);
+  var rows = Math.max(keepRows || sheet.getLastRow(), 2);
+
+  var header = sheet.getRange(1, 1, 1, cols);
+  header.setBackground(theme.HEADER_BG).setFontColor(theme.HEADER_TEXT).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  sheet.setRowHeight(1, 32);
+
+  var bodyRows = Math.max(rows - 1, 1);
+  var body = sheet.getRange(2, 1, bodyRows, cols);
+  body.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY);
+
+  for (var r = 2; r <= rows; r++) {
+    var bg = r % 2 === 0 ? theme.ROW_EVEN : theme.ROW_ODD;
+    sheet.getRange(r, 1, 1, cols).setBackground(bg);
+  }
+}
+
+function addTestData(sheet, articles, isInflow) {
+  var list = Array.isArray(articles) ? articles.filter(Boolean) : [];
+  if (!list.length) return;
+
+  var testArticle = list[0];
+  var now = new Date();
+  var d1 = new Date(now.getFullYear(), now.getMonth(), 1);
+  var d2 = new Date(now.getFullYear(), now.getMonth(), 15);
+
+  var rows = [
+    [d1, 'Тестовий ' + (isInflow ? 'клієнт А' : 'постачальник А'), testArticle, isInflow ? 10000 : 3000, 'Тестовий запис — видали перед використанням'],
+    [d2, 'Тестовий ' + (isInflow ? 'клієнт Б' : 'постачальник Б'), testArticle, isInflow ? 5000 : 2000, 'Тестовий запис — видали перед використанням']
+  ];
+
+  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange(2, 1, rows.length, rows[0].length)
+    .setBackground('#FFF9C4')
+    .setNote('Тестовий рядок — видали перед реальним використанням');
+}
+
+function buildInstructionSheet(ss, payload) {
+  var sheet = ss.getSheetByName('📖 Інструкція');
+  if (!sheet) sheet = ss.insertSheet('📖 Інструкція', 0);
+
+  sheet.clear();
+  sheet.getRange('A1').setValue((payload.business_name || 'Бізнес') + ' — Інструкція')
+    .setFontSize(16)
+    .setFontWeight('bold')
+    .setBackground('#1A56DB')
+    .setFontColor('#FFFFFF');
+
+  var lines = [
+    'ЯК ЧИТАТИ КОЛЬОРИ',
+    '🔵 Синій заголовок — колонки введення даних',
+    '🔴 Червоний заголовок — аркуші формул (не редагувати вручну)',
+    '🟡 Жовті рядки — тестові дані, видали перед стартом',
+    '',
+    'ЯК ВНОСИТИ ДАНІ',
+    '1. Заповнюй аркуші Надходження і Витрати',
+    '2. Аркуш Cashflow перераховується автоматично',
+    '3. Перед першим використанням видали жовті рядки 2-3',
+    '',
+    'ЯКЩО ЩОСЬ ЗЛАМАЛОСЬ',
+    '#REF! — перевір назви аркушів і формули',
+    '#NAME? — перевір назву функції або named range',
+    'Нуль у Cashflow — перевір збіг назв статей у ввідних аркушах і довідниках'
+  ];
+  sheet.getRange(3, 1, lines.length, 1).setValues(lines.map(function(v) { return [v]; }));
+
+  sheet.setRowHeight(1, 44);
+  sheet.setColumnWidth(1, 520);
+  sheet.protect().setWarningOnly(true).setDescription('Інструкція — краще не редагувати');
+  trimSheet(sheet, 45, 3);
+}
+
+function checkFormulaErrors(sheet) {
+  var values = sheet.getDataRange().getDisplayValues();
+  var errors = [];
+  for (var r = 0; r < values.length; r++) {
+    for (var c = 0; c < values[r].length; c++) {
+      var cell = values[r][c];
+      if (typeof cell === 'string' && (/^#REF!|^#ERROR!|^#NAME\?|^#VALUE!|^#DIV\/0!/).test(cell)) {
+        errors.push({ sheet: sheet.getName(), cell: columnToLetter_(c + 1) + String(r + 1), value: cell });
+      }
+    }
+  }
+  return errors;
+}
+
+function columnToLetter_(col) {
+  var temp = '';
+  var letter = '';
+  while (col > 0) {
+    temp = (col - 1) % 26;
+    letter = String.fromCharCode(temp + 65) + letter;
+    col = (col - temp - 1) / 26;
+  }
+  return letter;
+}
 
 function doPost(e) {
   try {
@@ -82,6 +213,8 @@ function buildTable(payload) {
     } else {
       buildDashboard_(context);
     }
+
+    buildInstructionSheet(ss, payload);
 
     if (payload.options && payload.options.formatting) {
       applyWorkbookTheme_(ss);
@@ -247,6 +380,21 @@ function validateTableAction(payload) {
     }
   }
 
+  ss.getSheets().forEach(function(sheet) {
+    checkFormulaErrors(sheet).forEach(function(e) {
+      errors.push(e.sheet + '!' + e.cell + ': ' + e.value);
+    });
+  });
+
+  var inputSheet = ss.getSheetByName('⬇️ Надходження') || ss.getSheetByName('⬆️ Витрати');
+  if (inputSheet && inputSheet.getLastRow() <= 1) {
+    warnings.push('Аркуш введення порожній — тестові дані не додались');
+  }
+
+  if (ss.getSheets().length > 0 && ss.getSheets()[0].getName().indexOf('Інструкція') === -1) {
+    warnings.push('Аркуш «Інструкція» не стоїть першим');
+  }
+
   var protections = ss.getProtections(SpreadsheetApp.ProtectionType.SHEET);
   if (!protections || protections.length === 0) {
     warnings.push('Зведений аркуш не захищений від редагування');
@@ -291,12 +439,14 @@ function buildCashflow_(ctx) {
   if (inflowsMode === 'A' || inflowsMode === 'B' || inflowsMode === 'C') {
     var inflowsSheet = ensureSheet_(ss, '⬇️ Надходження');
     setupInputSheet_(inflowsSheet, 'articles_inflows');
+    addTestData(inflowsSheet, articles.inflows || [], true);
     ctx.sheetsBuilt.push('⬇️ Надходження');
   }
 
   if (outflowsMode === 'A' || outflowsMode === 'B' || outflowsMode === 'C') {
     var outflowsSheet = ensureSheet_(ss, '⬆️ Витрати');
     setupInputSheet_(outflowsSheet, 'articles_outflows');
+    addTestData(outflowsSheet, articles.outflows || [], false);
     ctx.sheetsBuilt.push('⬆️ Витрати');
   }
 
@@ -347,6 +497,24 @@ function buildCashflow_(ctx) {
   var cashflow = ss.getSheetByName('📊 Cashflow');
   setupCashflowSummary_(cashflow, articles, extraExpenseSheets, formRequired);
   protectSheet_(cashflow, 'Зведений аркуш Cashflow');
+  cashflow.setFrozenColumns(1);
+
+  // Input sheets: 200 rows, formula/service sheets: compact with запас.
+  ['⬇️ Надходження', '⬆️ Витрати', '📝 Лог'].forEach(function(name) {
+    var sh = ss.getSheetByName(name);
+    if (sh) {
+      autoResizeAllColumns(sh);
+      trimSheet(sh, 200, Math.max(sh.getLastColumn() + 1, 6));
+    }
+  });
+
+  ['📊 Cashflow', '📋 Довідники', '⚙️ Налаштування', '🔗 References'].forEach(function(name) {
+    var sh = ss.getSheetByName(name);
+    if (sh) {
+      autoResizeAllColumns(sh);
+      trimSheet(sh, Math.max(sh.getLastRow() + 5, 20), Math.max(sh.getLastColumn() + 1, 6));
+    }
+  });
 
   if (formRequired) {
     var createdForms = createFormsForResponsible_(payload, ss.getId());
@@ -367,6 +535,8 @@ function buildPl_(ctx) {
   ensureSheet_(ss, '🔗 References');
 
   ctx.sheetsBuilt = ['📊 P&L', '💰 Доходи', '💸 Прямі витрати', '💸 Операційні витрати', '📋 Довідники', '⚙️ Налаштування', '🔗 References'];
+  var pl = ss.getSheetByName('📊 P&L');
+  if (pl) pl.setFrozenColumns(1);
 }
 
 function buildBalance_(ctx) {
@@ -376,6 +546,8 @@ function buildBalance_(ctx) {
   ensureSheet_(ss, '⚙️ Налаштування');
   ensureSheet_(ss, '🔗 References');
   ctx.sheetsBuilt = ['📊 Баланс', '📋 Довідники', '⚙️ Налаштування', '🔗 References'];
+  var balance = ss.getSheetByName('📊 Баланс');
+  if (balance) balance.setFrozenColumns(1);
 }
 
 function buildDashboard_(ctx) {
@@ -386,7 +558,7 @@ function buildDashboard_(ctx) {
   var dashboard = ss.getSheetByName('📊 Dashboard');
   dashboard.getRange('A1').setValue('Dashboard').setFontWeight('bold').setFontSize(16);
   dashboard.getRange('A3').setValue('Cashflow import:');
-  dashboard.getRange('B3').setFormula('=IFERROR(IMPORTRANGE(References!B1, "Cashflow!A1:D100"), "Надай доступ IMPORTRANGE")');
+  dashboard.getRange('B3').setFormula('=IFERROR(IMPORTRANGE(\'🔗 References\'!B1, "Cashflow!A1:D100"), "Надай доступ IMPORTRANGE")');
 
   ctx.sheetsBuilt = ['📊 Dashboard', '🔗 References'];
 }
@@ -684,29 +856,26 @@ function protectHeader_(sheet) {
 
 function applyWorkbookTheme_(ss) {
   var sheets = ss.getSheets();
+  var inputNames = {
+    '⬇️ Надходження': true,
+    '⬆️ Витрати': true,
+    '📝 Лог': true
+  };
+  var formulaNames = {
+    '📊 Cashflow': true,
+    '📊 P&L': true,
+    '📊 Баланс': true,
+    '📊 Dashboard': true
+  };
 
   for (var i = 0; i < sheets.length; i++) {
     var sheet = sheets[i];
     var maxCols = Math.max(sheet.getLastColumn(), 5);
-    var maxRows = Math.max(sheet.getLastRow(), 2);
+    var isInput = !!inputNames[sheet.getName()];
+    var isFormula = !!formulaNames[sheet.getName()];
+    var workingRows = isInput ? 200 : Math.max(sheet.getLastRow() + 3, 20);
 
-    var header = sheet.getRange(1, 1, 1, maxCols);
-    header.setBackground(THEME.HEADER_BG);
-    header.setFontColor(THEME.HEADER_TEXT);
-    header.setFontWeight('bold');
-    sheet.setFrozenRows(1);
-    sheet.setRowHeight(1, 32);
-
-    if (maxRows > 1) {
-      var inputRange = sheet.getRange(2, 1, maxRows - 1, maxCols);
-      inputRange.setBackground(THEME.INPUT_BG);
-
-      for (var row = 2; row <= maxRows; row++) {
-        if (row % 2 === 0) {
-          sheet.getRange(row, 1, 1, maxCols).setBackground(THEME.ALT_ROW_BG);
-        }
-      }
-    }
+    applySheetBanding_(sheet, isFormula ? FORMULA_THEME : INPUT_THEME, workingRows, maxCols);
 
     var lastCol = sheet.getLastColumn();
     var lastRow = sheet.getLastRow();

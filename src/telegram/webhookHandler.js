@@ -257,7 +257,8 @@ function tryParseJson(text) {
 
 function buildArchitectureMessage(analysis) {
     return [
-        "Проаналізував ТЗ.",
+        "📋 Проаналізував ТЗ.",
+        "",
         `Загальна кількість операцій: ${analysis.totalOps}/міс`,
         analysis.noAccessPeople.length > 0
             ? `Без доступу до Sheets: ${analysis.noAccessPeople.map((i) => `${i.name} (${i.ops})`).join(", ")}`
@@ -497,7 +498,7 @@ function formatTablesList(tablesInfo, draft) {
     }
 
     const activeId = draft.activeTableId || draft.spreadsheet_id || null;
-    const lines = ["Список таблиць:"];
+    const lines = ["📁 Твої таблиці:"];
     if (tablesInfo.clientFolder) lines.push(`Папка клієнта: ${tablesInfo.clientFolder}`);
     if (tablesInfo.folderUrl) lines.push(`Folder URL: ${tablesInfo.folderUrl}`);
     lines.push("");
@@ -509,7 +510,7 @@ function formatTablesList(tablesInfo, draft) {
         if (item.url) lines.push(`   url: ${item.url}`);
     });
 
-    lines.push("Використай /use <номер або spreadsheet_id> для перемикання.");
+    lines.push("Щоб перемкнутись — /use <номер або spreadsheet_id>");
     return lines.join("\n");
 }
 
@@ -533,20 +534,20 @@ function formatAppsScriptResult(result, payload, draft) {
     const files = Array.isArray(result.files) ? result.files : [];
     const forms = Array.isArray(result.forms) ? result.forms : [];
     const firstFile = files[0] || {};
-    const lines = ["Таблиця готова", ""];
+    const lines = ["✅ Таблиця готова!", ""];
 
-    if (firstFile.name) lines.push(`Файл: ${firstFile.name}`);
-    if (result.folder_url) lines.push(`Папка: ${result.folder_url}`);
-    if (firstFile.url) lines.push(`Посилання на файл: ${firstFile.url}`);
+    if (firstFile.name) lines.push(`📊 ${firstFile.name}`);
+    if (firstFile.url) lines.push(`🔗 ${firstFile.url}`);
+    if (result.folder_url) lines.push(`📁 Папка: ${result.folder_url}`);
 
     if (Array.isArray(result.sheets_built) && result.sheets_built.length > 0) {
-        lines.push("", "Що побудовано:");
+        lines.push("", "Що всередині:");
         result.sheets_built.forEach((name) => lines.push(`- ${name}`));
     }
 
     if (forms.length > 0) {
         lines.push("");
-        forms.forEach((form) => lines.push(`Google Form ${form.name}: ${form.url}`));
+        forms.forEach((form) => lines.push(`- Форма для ${form.name}: ${form.url}`));
     }
 
     const active = resolveActiveTable(draft);
@@ -555,12 +556,11 @@ function formatAppsScriptResult(result, payload, draft) {
         lines.push(`Active ID: ${active.spreadsheet_id}`);
     }
 
-    lines.push("", "Наступні кроки:");
-    lines.push("1. Відкрий файл і перевір структуру");
-    lines.push("2. Додай одну тестову операцію");
+    lines.push("", "Перші кроки:");
+    lines.push("1. Відкрий таблицю і перевір аркуш «Інструкція»");
+    lines.push("2. Видали жовті тестові рядки перед реальним використанням");
     if (payload.options?.counterparty_tracking) lines.push("3. Перевір дропдаун контрагентів");
-    lines.push("", "Для правок напиши текст або надішли update_table JSON.");
-    lines.push("Для списку таблиць: /tables");
+    lines.push("", "Якщо треба щось змінити — просто напиши.");
 
     return lines.join("\n");
 }
@@ -584,9 +584,10 @@ function formatLegacyResult(result, draft) {
 
 function formatBuildError(error) {
     return [
-        "Не вдалося побудувати.",
-        "Спробуй ще раз через /retry.",
-        `Причина: ${normalizeText(error?.message || "unknown")}`
+        "Не вдалось побудувати таблицю.",
+        `Причина: ${normalizeText(error?.message || "unknown")}`,
+        "Спробуй /retry — повторю спробу з тими самими даними.",
+        "Або напиши що змінити і я перебудую."
     ].join("\n");
 }
 
@@ -597,18 +598,19 @@ function hasBrokenFormulaError(validation) {
 
 function buildWelcomeMessage() {
     return [
-        "Привіт! Допоможу швидко зібрати фінансову таблицю під ваш бізнес.",
-        "Просто надішліть ТЗ у code-блоці з тегом tz або звичайним текстом — далі проведу крок за кроком.",
+        "👋 Привіт! Я допомагаю будувати фінансові таблиці для бізнесу.",
+        "Надішли мені опис того, що потрібно — текстом або у форматі tz-блоку.",
+        "Я проаналізую запит, задам кілька уточнень за потреби і побудую таблицю на твоєму Google Drive.",
         "",
         "Команди:",
-        "• /status — показати поточний стан роботи",
-        "• /tables — показати список ваших таблиць",
+        "• /status — поточний стан роботи",
+        "• /tables — список твоїх таблиць",
         "• /use — вибрати активну таблицю для правок",
         "• /new — почати створення нової таблиці",
         "• /retry — повторити останню побудову",
         "• /clear — очистити поточний діалог",
         "",
-        "Після створення таблиці можна одразу писати правки у вільній формі."
+        "Щоб почати — просто опиши свій бізнес і що треба відстежувати."
     ].join("\n\n");
 }
 
@@ -651,7 +653,7 @@ async function executeBuild(payload) {
 async function runBuildAndReply(message, draft, payload, commandLabel) {
     const chatId = message.chat.id;
     setDraft(chatId, { ...draft, stage: STAGES.BUILDING, lastPayload: payload });
-    await sendMessage(chatId, "Будую таблицю, це займе 30-60 секунд...");
+    await sendMessage(chatId, "⚙️ Будую таблицю, це займе ~30 секунд...");
     await sendMessage(chatId, "Планую структуру таблиці і готую аркуші...");
 
     try {
@@ -726,7 +728,7 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
             }
 
             const firstFile = build.result.files?.[0] || {};
-            let msg = "Таблиця готова\n\n";
+            let msg = "✅ Таблиця готова!\n\n";
             if (firstFile.name) msg += `${firstFile.name}\n`;
             if (firstFile.url) msg += `${firstFile.url}\n`;
 
@@ -743,7 +745,7 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
                 });
             }
 
-            msg += "\n\nМожна вносити правки далі — просто напиши, що змінити.";
+            msg += "\n\nЯкщо треба щось змінити — просто напиши.";
             msg += "\nЩоб створити нову таблицю, натисни кнопку нижче або напиши /new.";
             await sendMessage(chatId, msg, withNewTableButton());
             return { handled: true, command: commandLabel, engine: "apps_script", result: build.result };
@@ -772,11 +774,11 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
         };
         setDraft(chatId, updatedDraft);
 
-        await sendMessage(chatId, formatLegacyResult(build.result, updatedDraft));
+        await sendMessage(chatId, "✅ Таблиця готова через резервний режим.\n\n" + formatLegacyResult(build.result, updatedDraft));
         return { handled: true, command: commandLabel, engine: "legacy", result: build.result };
     } catch (error) {
         setDraft(chatId, { ...getDraft(chatId), stage: STAGES.CONFIRMING, lastPayload: payload });
-        await sendMessage(chatId, formatBuildError(error));
+        await sendMessage(chatId, "❌ " + formatBuildError(error));
         return { handled: true, command: commandLabel, error: error.message };
     }
 }
@@ -852,8 +854,11 @@ async function startCustomArchitectureMode(message, draft) {
 
     await sendMessage(chatId, messageText);
     await sendMessage(chatId, [
-        "Щоб почати планування, дай відповіді на ці пункти:",
-        ...pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`)
+        "Кілька питань про команду:",
+        "",
+        ...pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`),
+        "",
+        "Відповідай нумеровано, наприклад: 1. Через бухгалтера / 2. Щотижня / 3. Ні"
     ].join("\n"));
 
     return { handled: true, command: "custom_architect_started" };
@@ -998,7 +1003,14 @@ async function handleTzCapture(message, draft) {
     }
 
     if (!tz && routing.mode !== "known") {
-        await sendMessage(chatId, "Надішли ТЗ у tz code block, JSON або просто текст з описом процесу.");
+        await sendMessage(chatId, [
+            "Не вистачає кількох деталей:",
+            "",
+            "1. Не визначений тип таблиці — це Cashflow, P&L чи щось інше?",
+            "2. Опиши коротко які операції треба відстежувати.",
+            "",
+            "Відповідай нумеровано або просто допиши опис."
+        ].join("\n"));
         return { handled: true, command: "awaiting_tz" };
     }
 
@@ -1054,7 +1066,12 @@ async function handleTzCapture(message, draft) {
 
     await sendMessage(chatId, aiBundle.message || buildArchitectureMessage(analysis));
     if (pendingQuestions.length > 0) {
-        await sendMessage(chatId, pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`).join("\n"));
+        await sendMessage(chatId, [
+            "Є кілька уточнень перед тим як починати:",
+            ...pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`),
+            "",
+            "Відповідай нумеровано, наприклад: 1. Через бухгалтера / 2. Щотижня / 3. Ні"
+        ].join("\n"));
     }
 
     return { handled: true, command: "tz_clarification_started" };
@@ -1077,7 +1094,10 @@ async function handleCollectingAnswers(message, draft) {
 
     if (updated.pendingQuestions.length > 0) {
         setDraft(chatId, nextDraft);
-        await sendMessage(chatId, updated.pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`).join("\n"));
+        await sendMessage(chatId, [
+            "Кілька уточнень:",
+            ...updated.pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`)
+        ].join("\n"));
         return { handled: true, command: "clarify_answers" };
     }
 
@@ -1211,9 +1231,9 @@ async function handleEditingMode(message, draft) {
         const tableId = payload.spreadsheet_id || draft.activeTableId || draft.spreadsheet_id || "";
         const tableUrl = spreadsheetUrlById(tableId);
         const messageText = [
-            "Правки внесено.",
+            "✅ Готово. Правки внесено.",
             tableUrl ? `Посилання на таблицю:\n${tableUrl}` : "",
-            "Можна вносити правки далі.",
+            "Таблиця оновлена. Якщо треба ще щось — пиши.",
             "Щоб створити нову таблицю, натисни кнопку нижче або напиши /new."
         ].filter(Boolean).join("\n\n");
         await sendMessage(chatId, messageText, withNewTableButton());
@@ -1235,9 +1255,9 @@ async function handleEditingMode(message, draft) {
     const tableId = aiResult.update_payload.spreadsheet_id || draft.activeTableId || draft.spreadsheet_id || "";
     const tableUrl = spreadsheetUrlById(tableId);
     const messageText = [
-        "Правки внесено.",
+        "✅ Готово. Правки внесено.",
         tableUrl ? `Посилання на таблицю:\n${tableUrl}` : "",
-        "Можна вносити правки далі.",
+        "Таблиця оновлена. Якщо треба ще щось — пиши.",
         "Щоб створити нову таблицю, натисни кнопку нижче або напиши /new."
     ].filter(Boolean).join("\n\n");
     await sendMessage(chatId, messageText, withNewTableButton());
@@ -1316,7 +1336,7 @@ async function handleTelegramUpdate(update) {
 
     if (command === "/clear") {
         clearDraft(chatId);
-        await sendMessage(chatId, "Стан очищено. Надішли новий ТЗ у tz code block або простим текстом.");
+        await sendMessage(chatId, "🗑 Стан очищено. Можеш починати з нового ТЗ.");
         return { handled: true, command };
     }
 
@@ -1352,7 +1372,7 @@ async function handleTelegramUpdate(update) {
             await sendMessage(chatId, "Немає payload для повтору. Надішли ТЗ або JSON.");
             return { handled: true, command };
         }
-
+        await sendMessage(chatId, "🔄 Повторюю побудову...");
         return runBuildAndReply(message, draft, draft.lastPayload, "retry");
     }
 
