@@ -1,7 +1,7 @@
 {
     "name": "google-sheets-ai-agent",
     "version": "0.1.0",
-    "description": "Google Drive/Sheets report builder for Cashflow and P&L",
+    "description": "Telegram + Apps Script financial table builder with optional Claude/OpenRouter AI assistant",
     "main": "src/server.js",
     "type": "commonjs",
     "scripts": {
