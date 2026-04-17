@@ -1,5 +1,6 @@
 var ROOT_FOLDER_NAME = 'Фінансова система — Курс';
 var DEFAULT_SHARE_MODE = 'anyone_with_link';
+var SETTINGS_SHEET_NAME = '⚙️ Налаштування';
 var THEME = {
   HEADER_BG: '#1A56DB',
   HEADER_TEXT: '#FFFFFF',
@@ -185,6 +186,9 @@ function updateTable(payload) {
           break;
         case 'remove_sheet':
           results.push(removeSheet_(ss, change));
+          break;
+        case 'repair_formulas':
+          results.push(repairFormulas_(ss));
           break;
         default:
           results.push({ type: change.type, status: 'unknown type' });
@@ -412,7 +416,7 @@ function setupPersonalExpenseSheet_(sheet) {
   sheet.getRange('F1').setValue('Підсумок');
   sheet.getRange('G1').setFormula('=SUM(D2:D)');
   sheet.getRange('F2').setValue('Залишок авансу');
-  sheet.getRange('G2').setFormula('=Settings!B6-SUM(D2:D)');
+  sheet.getRange('G2').setFormula('=\'' + SETTINGS_SHEET_NAME + '\'!B6-SUM(D2:D)');
   protectHeader_(sheet);
 }
 
@@ -424,14 +428,14 @@ function setupPaymentCalendar_(sheet) {
 
   for (var row = 2; row <= 40; row++) {
     if (row === 2) {
-      sheet.getRange(row, 4).setFormula('=Settings!B4+B2-C2');
+      sheet.getRange(row, 4).setFormula('=\'' + SETTINGS_SHEET_NAME + '\'!B4+B2-C2');
     } else {
       sheet.getRange(row, 4).setFormula('=D' + (row - 1) + '+B' + row + '-C' + row);
     }
   }
 
   var rule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied('=$D2<Settings!B5')
+    .whenFormulaSatisfied('=$D2<\'' + SETTINGS_SHEET_NAME + '\'!B5')
     .setBackground('#FEF2F2')
     .setRanges([sheet.getRange('A2:D1000')])
     .build();
@@ -545,7 +549,7 @@ function setupCashflowSummary_(sheet, articles, extraExpenseSheets, includeLog) 
     ['Загальні надходження', '=SUM(B2:B' + (totalRow - 2) + ')'],
     ['Загальні виплати', '=SUM(C2:C' + (totalRow - 2) + ')'],
     ['Чистий Cashflow', '=B' + totalRow + '-B' + (totalRow + 1)],
-    ['Залишок', '=Settings!B4+B' + (totalRow + 2)]
+    ['Залишок', '=\'' + SETTINGS_SHEET_NAME + '\'!B4+B' + (totalRow + 2)]
   ]);
 
   var rules = sheet.getConditionalFormatRules();
@@ -736,6 +740,40 @@ function addArticle_(ss, change) {
   createNamedRange(ss, sheet, rangeName, 2, col, Math.max(lastRow, 1));
 
   return { type: 'add_article', status: 'ok', article: change.article };
+}
+
+function repairFormulas_(ss) {
+  var sheets = ss.getSheets();
+  var fixed = 0;
+
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    var dataRange = sheet.getDataRange();
+    if (!dataRange) continue;
+
+    var formulas = dataRange.getFormulas();
+    var changed = false;
+
+    for (var r = 0; r < formulas.length; r++) {
+      for (var c = 0; c < formulas[r].length; c++) {
+        var formula = formulas[r][c];
+        if (!formula) continue;
+
+        var next = formula.replace(/(^|[^A-Za-z0-9_'])Settings!/g, "$1'" + SETTINGS_SHEET_NAME + "'!");
+        if (next !== formula) {
+          formulas[r][c] = next;
+          changed = true;
+          fixed++;
+        }
+      }
+    }
+
+    if (changed) {
+      dataRange.setFormulas(formulas);
+    }
+  }
+
+  return { type: 'repair_formulas', status: 'ok', fixed_formulas: fixed };
 }
 
 function removeArticle_(ss, change) {

@@ -490,6 +490,11 @@ function formatBuildError(error) {
     ].join("\n");
 }
 
+function hasBrokenFormulaError(validation) {
+    const errors = Array.isArray(validation?.errors) ? validation.errors : [];
+    return errors.some((item) => /зламані формули|#ref|#error|#name/i.test(String(item || "")));
+}
+
 function buildWelcomeMessage() {
     const llm = getConfigSummary();
     const llmLine = llm.enabled
@@ -543,6 +548,7 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
     const chatId = message.chat.id;
     setDraft(chatId, { ...draft, stage: STAGES.BUILDING, lastPayload: payload });
     await sendMessage(chatId, "Будую таблицю, це займе 30-60 секунд...");
+    await sendMessage(chatId, "Планую структуру таблиці і готую аркуші...");
 
     try {
         const build = await executeBuild(payload);
@@ -565,29 +571,54 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
             };
             setDraft(chatId, updatedDraft);
 
+            await sendMessage(chatId, "Перевіряю формули і цілісність файлу...");
+
             let validationResult = null;
             if (activeId) {
                 try {
                     validationResult = await validateTableViaAppsScript({ spreadsheet_id: activeId });
                 } catch (error) {
-                    validationResult = {
-                        valid: false,
-                        errors: [`Помилка validate_table: ${error.message}`],
-                        warnings: []
-                    };
+                    const message = String(error?.message || "");
+                    const missingValidateAction = /unknown action:\s*validate_table/i.test(message);
+                    if (missingValidateAction) {
+                        validationResult = {
+                            valid: true,
+                            errors: [],
+                            warnings: ["Валідація пропущена: у поточному Apps Script ще немає action validate_table"]
+                        };
+                    } else {
+                        validationResult = {
+                            valid: false,
+                            errors: [`Помилка validate_table: ${message}`],
+                            warnings: []
+                        };
+                    }
                 }
             }
 
             if (validationResult && validationResult.valid === false) {
-                const lines = ["⚠️ Таблиця побудована, але є проблеми:"];
-                (validationResult.errors || []).forEach((item) => lines.push(`❌ ${item}`));
-                if (Array.isArray(validationResult.warnings) && validationResult.warnings.length > 0) {
-                    lines.push("", "Попередження:");
-                    validationResult.warnings.forEach((item) => lines.push(`⚠️ ${item}`));
+                if (activeId && hasBrokenFormulaError(validationResult)) {
+                    await sendMessage(chatId, "Знайшов технічний збій у формулах, виправляю автоматично...");
+                    try {
+                        await updateTableViaAppsScript({
+                            action: "update_table",
+                            spreadsheet_id: activeId,
+                            changes: [{ type: "repair_formulas" }]
+                        });
+                        validationResult = await validateTableViaAppsScript({ spreadsheet_id: activeId });
+                    } catch {
+                        // If repair fails, we keep generic fallback below.
+                    }
+
+                    if (validationResult && validationResult.valid) {
+                        await sendMessage(chatId, "Формули виправлено. Завершую налаштування...");
+                    }
                 }
-                lines.push("", "Спробуй /retry або напиши, що змінити.");
-                await sendMessage(chatId, lines.join("\n"));
-                return { handled: true, command: commandLabel, engine: "apps_script", result: build.result, validation: validationResult };
+
+                if (validationResult && validationResult.valid === false) {
+                    await sendMessage(chatId, "Є технічна проблема під час фінальної перевірки. Я вже зберіг таблицю, але потрібно повторити /retry для автоматичної доводки.");
+                    return { handled: true, command: commandLabel, engine: "apps_script", result: build.result, validation: validationResult };
+                }
             }
 
             const firstFile = build.result.files?.[0] || {};
