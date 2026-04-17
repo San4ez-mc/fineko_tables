@@ -119,6 +119,24 @@ function normalizeText(value) {
     return String(value || "").trim();
 }
 
+function spreadsheetUrlById(spreadsheetId) {
+    const id = normalizeText(spreadsheetId);
+    return id ? `https://docs.google.com/spreadsheets/d/${id}/edit` : "";
+}
+
+function withNewTableButton() {
+    return {
+        reply_markup: {
+            keyboard: [[{ text: "➕ Створити нову таблицю" }]],
+            resize_keyboard: true
+        }
+    };
+}
+
+function isNewTableButtonText(text) {
+    return /^\s*➕?\s*створити\s+нову\s+таблицю\s*$/i.test(String(text || ""));
+}
+
 function splitAnswers(text) {
     return String(text || "")
         .split(/\r?\n/)
@@ -652,8 +670,9 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
                 });
             }
 
-            msg += "\n\nЯкщо треба щось змінити — просто напиши.";
-            await sendMessage(chatId, msg);
+            msg += "\n\nМожна вносити правки далі — просто напиши, що змінити.";
+            msg += "\nЩоб створити нову таблицю, натисни кнопку нижче або напиши /new.";
+            await sendMessage(chatId, msg, withNewTableButton());
             return { handled: true, command: commandLabel, engine: "apps_script", result: build.result };
         }
 
@@ -965,6 +984,7 @@ async function buildUpdatePayloadWithAi(chatId, text, draft) {
         });
     } catch (error) {
         disableAiForChat(chatId, draft, error?.message);
+        await sendMessage(chatId, "Не зміг розпізнати правку через AI, застосовую базовий режим.");
         return {
             missing: [],
             message_to_user: "",
@@ -986,7 +1006,15 @@ async function handleEditingMode(message, draft) {
         }
 
         const result = await updateTableViaAppsScript(payload);
-        await sendMessage(chatId, `Правку застосовано: ${JSON.stringify(result)}`);
+        const tableId = payload.spreadsheet_id || draft.activeTableId || draft.spreadsheet_id || "";
+        const tableUrl = spreadsheetUrlById(tableId);
+        const messageText = [
+            "Правки внесено.",
+            tableUrl ? `Посилання на таблицю:\n${tableUrl}` : "",
+            "Можна вносити правки далі.",
+            "Щоб створити нову таблицю, натисни кнопку нижче або напиши /new."
+        ].filter(Boolean).join("\n\n");
+        await sendMessage(chatId, messageText, withNewTableButton());
         return { handled: true, command: "editing_json_update" };
     }
 
@@ -1002,7 +1030,15 @@ async function handleEditingMode(message, draft) {
     }
 
     const result = await updateTableViaAppsScript(aiResult.update_payload);
-    await sendMessage(chatId, `Правку застосовано: ${JSON.stringify(result)}`);
+    const tableId = aiResult.update_payload.spreadsheet_id || draft.activeTableId || draft.spreadsheet_id || "";
+    const tableUrl = spreadsheetUrlById(tableId);
+    const messageText = [
+        "Правки внесено.",
+        tableUrl ? `Посилання на таблицю:\n${tableUrl}` : "",
+        "Можна вносити правки далі.",
+        "Щоб створити нову таблицю, натисни кнопку нижче або напиши /new."
+    ].filter(Boolean).join("\n\n");
+    await sendMessage(chatId, messageText, withNewTableButton());
     return { handled: true, command: "editing_auto_update" };
 }
 
@@ -1100,6 +1136,10 @@ async function handleTelegramUpdate(update) {
     }
 
     if (command === "/new") {
+        return handleNewCommand(message, draft);
+    }
+
+    if (isNewTableButtonText(text)) {
         return handleNewCommand(message, draft);
     }
 
