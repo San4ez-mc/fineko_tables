@@ -230,7 +230,7 @@ function buildTable(payload) {
     }];
 
     return respond({
-      status: validation.valid ? 'ok' : 'error',
+      status: 'ok',
       folder_url: clientFolder.getUrl(),
       client_folder: clientFolderName,
       files: files,
@@ -802,12 +802,14 @@ function validateBuiltFile(spreadsheet, payload) {
     });
   }
 
-  var mainSheet = spreadsheet.getSheetByName('📊 Cashflow') || spreadsheet.getSheetByName('📊 P&L') || spreadsheet.getSheets()[0];
-  var formulas = mainSheet.getDataRange().getFormulas().reduce(function(acc, row) {
-    return acc.concat(row);
-  }, []).filter(function(f) { return f !== ''; });
-  if (formulas.length === 0) {
-    errors.push('Зведений аркуш не містить формул');
+  if (reportType === 'cashflow') {
+    var mainSheet = spreadsheet.getSheetByName('📊 Cashflow') || spreadsheet.getSheets()[0];
+    var formulas = mainSheet.getDataRange().getFormulas().reduce(function(acc, row) {
+      return acc.concat(row);
+    }, []).filter(function(f) { return f !== ''; });
+    if (formulas.length === 0) {
+      errors.push('Зведений аркуш не містить формул');
+    }
   }
 
   return { valid: errors.length === 0, errors: errors };

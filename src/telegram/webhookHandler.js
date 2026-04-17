@@ -128,6 +128,12 @@ function looksLikeCashflowRequest(text) {
     return /(кешфлоу|кеш\s*флоу|кефлоу|cashflow|cash\s*flow)/i.test(String(text || ""));
 }
 
+function looksLikeFinanceNarrative(text) {
+    const source = String(text || "");
+    if (source.length < 120) return false;
+    return /(гроші|оплат|надход|витрат|закуп|зарплат|оренд|логіст|реклам|постачаль|клієнт)/i.test(source);
+}
+
 function parseArticlesFromLine(line) {
     const source = String(line || "");
     const parts = source.includes(":") ? source.split(":").slice(1).join(":") : source;
@@ -140,7 +146,7 @@ function parseArticlesFromLine(line) {
 
 function parseCashflowHeuristicFromText(text) {
     const source = String(text || "");
-    if (!looksLikeCashflowRequest(source)) return null;
+    if (!looksLikeCashflowRequest(source) && !looksLikeFinanceNarrative(source)) return null;
 
     const lines = source.split(/\r?\n/).map((line) => normalizeText(line)).filter(Boolean);
     const inflowLine = lines.find((line) => /(гроші\s*приход|надход|приходять|дохід|оплат)/i.test(line)) || "";
@@ -283,7 +289,7 @@ function normalizeReportType(value) {
 function detectKnownTypeFromText(text) {
     const source = String(text || "").toLowerCase();
     if (/(кешфлоу|кеш\s*флоу|кефлоу|cash\s*flow|cashflow)/i.test(source)) return "cashflow";
-    if (/(p&l|\bpl\b|п\s*&\s*л|прибут|збитк)/i.test(source)) return "pl";
+    if (/(p&l|\bpl\b|п\s*&\s*л|profit\s*(and|&)\s*loss|прибутк(и|у)?\s*і\s*збитк(и|ів))/i.test(source)) return "pl";
     if (/(баланс|balance)/i.test(source)) return "balance";
     if (/(дашборд|dashboard)/i.test(source)) return "dashboard";
     return "";
@@ -943,6 +949,7 @@ function ensureBuildMinimum(tz) {
     const inflows = Array.isArray(next.inflows) ? next.inflows : [];
     const outflows = Array.isArray(next.outflows) ? next.outflows : [];
     if (inflows.length + outflows.length === 0) {
+        next.inflows = [{ article: "Оплата від клієнтів", responsible: "Owner", ops_per_month: 10, has_sheets_access: true }];
         next.outflows = [{ article: "Інші витрати", responsible: "Owner", ops_per_month: 10, has_sheets_access: true }];
     }
 
