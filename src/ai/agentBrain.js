@@ -50,12 +50,17 @@ function getConfigSummary() {
     };
 }
 
-async function callAnthropicJson({ systemPrompt, userPrompt }) {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-        throw new Error("ANTHROPIC_API_KEY is missing");
-    }
+function getAnthropicFallbackModels(primaryModel) {
+    const candidates = [
+        "claude-3-5-haiku-20241022",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-haiku-20240307"
+    ];
 
+    return candidates.filter((model) => model !== primaryModel);
+}
+
+async function callAnthropicOnce({ apiKey, model, systemPrompt, userPrompt }) {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
@@ -64,7 +69,7 @@ async function callAnthropicJson({ systemPrompt, userPrompt }) {
             "anthropic-version": "2023-06-01"
         },
         body: JSON.stringify({
-            model: getModel("anthropic"),
+            model,
             max_tokens: 1200,
             temperature: DEFAULT_TEMPERATURE,
             system: systemPrompt,
@@ -78,15 +83,43 @@ async function callAnthropicJson({ systemPrompt, userPrompt }) {
     });
 
     const data = await response.json();
-    if (!response.ok) {
-        throw new Error(`Anthropic error ${response.status}: ${JSON.stringify(data)}`);
+    return { response, data };
+}
+
+async function callAnthropicJson({ systemPrompt, userPrompt }) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+        throw new Error("ANTHROPIC_API_KEY is missing");
     }
 
-    const text = Array.isArray(data.content)
-        ? data.content.filter((item) => item.type === "text").map((item) => item.text).join("\n")
-        : "";
+    const primaryModel = getModel("anthropic");
+    const fallbackModels = getAnthropicFallbackModels(primaryModel);
+    const modelsToTry = [primaryModel].concat(fallbackModels);
 
-    return parseJsonFromText(text);
+    let lastError = null;
+    for (const model of modelsToTry) {
+        const { response, data } = await callAnthropicOnce({ apiKey, model, systemPrompt, userPrompt });
+        if (response.ok) {
+            const text = Array.isArray(data.content)
+                ? data.content.filter((item) => item.type === "text").map((item) => item.text).join("\n")
+                : "";
+
+            return parseJsonFromText(text);
+        }
+
+        const message = String(data?.error?.message || "");
+        const type = String(data?.error?.type || "");
+        const isModelNotFound = response.status === 404 && (type === "not_found_error" || /model\s*:/i.test(message));
+        lastError = new Error(`Anthropic error ${response.status}: ${JSON.stringify(data)}`);
+
+        if (!isModelNotFound) {
+            throw lastError;
+        }
+
+        console.warn("Anthropic model fallback", { failedModel: model, nextModel: fallbackModels[0] || null, reason: message });
+    }
+
+    throw lastError || new Error("Anthropic model fallback failed");
 }
 
 async function callOpenRouterJson({ systemPrompt, userPrompt }) {
