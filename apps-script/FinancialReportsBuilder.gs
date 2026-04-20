@@ -4,8 +4,10 @@ var SETTINGS_SHEET_NAME = '⚙️ Налаштування';
 var DEBUG_LOG_FILE_NAME = 'DEBUG_APP_SCRIPT_LOGS';
 var DEBUG_LOG_SHEET_NAME = 'Logs';
 var DEBUG_LOG_PROPERTY_KEY = 'DEBUG_LOG_SPREADSHEET_ID';
+var DRIVE_PARENT_FOLDER_PROPERTY_KEY = 'GOOGLE_DRIVE_PARENT_FOLDER_ID';
 var CURRENT_TRACE_ID = '';
 var CURRENT_ACTION = '';
+var CURRENT_PARENT_FOLDER_ID = '';
 var INPUT_THEME = {
   HEADER_BG: '#1A56DB',
   HEADER_TEXT: '#FFFFFF',
@@ -190,6 +192,16 @@ function getDebugLogSpreadsheet_() {
   return spreadsheet;
 }
 
+function resolveParentFolderId_() {
+  if (CURRENT_PARENT_FOLDER_ID) {
+    return String(CURRENT_PARENT_FOLDER_ID);
+  }
+
+  var props = PropertiesService.getScriptProperties();
+  var configuredId = props.getProperty(DRIVE_PARENT_FOLDER_PROPERTY_KEY);
+  return configuredId ? String(configuredId) : '';
+}
+
 function appendDebugLog_(level, step, message, details) {
   try {
     var spreadsheet = getDebugLogSpreadsheet_();
@@ -236,12 +248,14 @@ function doPost(e) {
     var payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     CURRENT_TRACE_ID = traceId;
     CURRENT_ACTION = String(payload.action || '');
+    CURRENT_PARENT_FOLDER_ID = String(payload.drive_parent_folder_id || '');
     logInfo_('doPost.start', 'Apps Script request started', {
       action: payload.action || '',
       report_type: payload.report_type || '',
       telegram_id: payload.telegram_id || '',
       spreadsheet_id: payload.spreadsheet_id || '',
-      changes_count: Array.isArray(payload.changes) ? payload.changes.length : 0
+      changes_count: Array.isArray(payload.changes) ? payload.changes.length : 0,
+      drive_parent_folder_id: CURRENT_PARENT_FOLDER_ID || resolveParentFolderId_() || ''
     });
     var output;
 
@@ -279,6 +293,8 @@ function doPost(e) {
         valid: parsed.valid,
         errors_count: (parsed.errors || []).length,
         warnings_count: (parsed.warnings || []).length,
+        errors_preview: Array.isArray(parsed.errors) ? parsed.errors.slice(0, 3) : [],
+        warnings_preview: Array.isArray(parsed.warnings) ? parsed.warnings.slice(0, 3) : [],
         log_sheet_url: parsed.log_sheet_url
       });
 
@@ -325,7 +341,8 @@ function buildTable(payload) {
     var clientFolder = getOrCreateFolder(rootFolder, clientFolderName);
     logInfo_('build_table.prepare_drive', 'Prepared client folder', {
       client_folder: clientFolderName,
-      root_folder: ROOT_FOLDER_NAME
+      root_folder: ROOT_FOLDER_NAME,
+      drive_parent_folder_id: resolveParentFolderId_() || ''
     });
 
     var baseFileName = titleByType_(reportType) + '_' + businessName + '_' + year;
@@ -382,7 +399,8 @@ function buildTable(payload) {
     var validation = validateBuiltFile(ss, payload);
     logInfo_('build_table.validation', 'Post-build validation finished', {
       valid: validation.valid,
-      errors_count: Array.isArray(validation.errors) ? validation.errors.length : 0
+      errors_count: Array.isArray(validation.errors) ? validation.errors.length : 0,
+      errors_preview: Array.isArray(validation.errors) ? validation.errors.slice(0, 3) : []
     });
     var files = [{
       name: resolvedFileName,
@@ -602,6 +620,13 @@ function validateTableAction(payload) {
   if (!protections || protections.length === 0) {
     warnings.push('Зведений аркуш не захищений від редагування');
   }
+
+  logInfo_('validate_table.result', 'Validation finished', {
+    spreadsheet_id: payload.spreadsheet_id,
+    valid: errors.length === 0,
+    errors: errors.slice(0, 10),
+    warnings: warnings.slice(0, 10)
+  });
 
   return respond({
     status: 'ok',
@@ -1233,6 +1258,11 @@ function getRequiredSheets_(payload, reportType) {
 }
 
 function getOrCreateRootFolder_() {
+  var configuredParentFolderId = resolveParentFolderId_();
+  if (configuredParentFolderId) {
+    return DriveApp.getFolderById(configuredParentFolderId);
+  }
+
   var folders = DriveApp.getFoldersByName(ROOT_FOLDER_NAME);
   if (folders.hasNext()) {
     return folders.next();

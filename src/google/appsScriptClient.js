@@ -28,6 +28,18 @@ function getAppsScriptUrl() {
     return url;
 }
 
+function withDriveParentFolder(payload) {
+    const driveParentFolderId = process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID;
+    if (!driveParentFolderId) {
+        return { ...(payload || {}) };
+    }
+
+    return {
+        ...(payload || {}),
+        drive_parent_folder_id: driveParentFolderId
+    };
+}
+
 async function callAppsScript(payload, options = {}) {
     const url = getAppsScriptUrl();
     const timeoutMs = Number(options.timeoutMs || DEFAULT_TIMEOUT_MS);
@@ -35,14 +47,15 @@ async function callAppsScript(payload, options = {}) {
     const startedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const requestPayload = withDriveParentFolder(payload);
 
     console.info("AppsScript request start", {
         traceId,
         timeoutMs,
-        summary: summarizePayload(payload)
+        summary: summarizePayload(requestPayload)
     });
     if (APPS_SCRIPT_DEBUG) {
-        console.info("AppsScript request payload", { traceId, payload: payload || {} });
+        console.info("AppsScript request payload", { traceId, payload: requestPayload || {} });
     }
 
     try {
@@ -51,7 +64,7 @@ async function callAppsScript(payload, options = {}) {
             headers: {
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify(payload || {}),
+            body: JSON.stringify(requestPayload || {}),
             signal: controller.signal
         });
 
@@ -97,7 +110,7 @@ async function callAppsScript(payload, options = {}) {
                 traceId,
                 timeoutMs,
                 durationMs: Date.now() - startedAt,
-                summary: summarizePayload(payload)
+                summary: summarizePayload(requestPayload)
             });
             throw new Error(`Apps Script timeout after ${timeoutMs}ms`);
         }
@@ -105,7 +118,7 @@ async function callAppsScript(payload, options = {}) {
         console.error("AppsScript request failed", {
             traceId,
             durationMs: Date.now() - startedAt,
-            summary: summarizePayload(payload),
+            summary: summarizePayload(requestPayload),
             error: String(error?.message || error)
         });
 
