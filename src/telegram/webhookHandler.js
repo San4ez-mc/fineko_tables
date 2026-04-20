@@ -351,8 +351,6 @@ function normalizeAnswerValue(value, fallback) {
 
 function applyAnswers(draft, text) {
     const answers = splitAnswers(text);
-        ...getQuestionGlossary(questions).map((item) => `Пояснення: ${item}`),
-        getQuestionGlossary(questions).length > 0 ? "" : "",
     const batch = Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [];
     const resolved = { ...(draft.answers || {}) };
 
@@ -365,8 +363,8 @@ function applyAnswers(draft, text) {
         };
     }
 
-        `Надходження: архітектура ${analysis.inflowsMode} (A = одна проста вкладка, B = кілька джерел або людей, C = складний процес з багатьма учасниками)`,
-        `Витрати: архітектура ${analysis.outflowsMode} (A = одна проста вкладка, B = кілька джерел або людей, C = складний процес з багатьма учасниками)`
+    if (batch.length === 1) {
+        resolved[batch[0].key] = normalizeAnswerValue(text);
     } else {
         batch.slice(0, answers.length).forEach((question, index) => {
             resolved[question.key] = normalizeAnswerValue(answers[index]);
@@ -374,7 +372,7 @@ function applyAnswers(draft, text) {
     }
 
     const answeredCount = batch.length === 1 ? 1 : Math.min(batch.length, answers.length);
-        `Аркуші (вкладки в таблиці): ${inferSheetsFromPayload(payload).join(", ")}`,
+    const queuedAfterCurrentBatch = Array.isArray(draft.questionsQueue)
         ? draft.questionsQueue.slice(batch.length)
         : [];
     const remainingQueue = batch.slice(answeredCount).concat(queuedAfterCurrentBatch);
@@ -387,14 +385,14 @@ function applyAnswers(draft, text) {
     };
 }
 
-            text: "Вкажи тип таблиці: cashflow (рух грошей), pl / P&L (прибутки і збитки), balance (баланс), dashboard (зведений екран з показниками)"
+function tryParseJson(text) {
     const trimmed = normalizeText(text);
     if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
 
     try {
         return JSON.parse(trimmed);
     } catch {
-            text: "Дай мінімум 1-2 статті, тобто які саме гроші заходять і на що витрачаються (формат: Надходження: ..., Витрати: ...)"
+        return null;
     }
 }
 
@@ -404,11 +402,11 @@ function buildArchitectureMessage(analysis) {
         "",
         `Загальна кількість операцій: ${analysis.totalOps}/міс`,
         analysis.noAccessPeople.length > 0
-            text: `${article} — ${person}: як проходить оплата? Підзвіт = людина платить сама і потім записує витрату. Заявка через бухгалтера = бухгалтер оплачує централізовано.`
+            ? `Без доступу до Sheets: ${analysis.noAccessPeople.map((i) => `${i.name} (${i.ops})`).join(", ")}`
             : "Без доступу до Sheets: немає",
-        `Надходження: архітектура ${analysis.inflowsMode}`,
-        `Витрати: архітектура ${analysis.outflowsMode}`
-            text: `${article} — якщо це підзвіт, як зручніше вносити дані: Google Form (проста форма за посиланням) чи окремий аркуш (окрема вкладка в таблиці)?`
+        `Надходження: архітектура ${analysis.inflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`,
+        `Витрати: архітектура ${analysis.outflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`
+    ].join("\n");
 }
 
 function hasAtLeastOneArticle(tz) {
@@ -436,8 +434,8 @@ function detectRoutingMode(text, parsedTz) {
     const fromTz = normalizeReportType(parsedTz?.report_type);
     if (fromTz) return { mode: "known", reportType: fromTz };
 
-        `Надходження: архітектура ${analysis.inflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`,
-        `Витрати: архітектура ${analysis.outflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`
+    const fromText = detectKnownTypeFromText(text);
+    if (fromText) return { mode: "known", reportType: fromText };
 
     const asksToBuild = /(зроби|побудуй|створи|потрібна|потрібен|таблиц|table)/i.test(String(text || ""));
     if (asksToBuild) return { mode: "custom", reportType: "" };
