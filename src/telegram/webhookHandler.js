@@ -1,5 +1,5 @@
 ﻿const { buildReports } = require("../google/reportBuilder");
-const { buildTableViaAppsScript, updateTableViaAppsScript, listTablesViaAppsScript, validateTableViaAppsScript } = require("../google/appsScriptClient");
+const { pingAppsScript, buildTableViaAppsScript, updateTableViaAppsScript, listTablesViaAppsScript, validateTableViaAppsScript } = require("../google/appsScriptClient");
 const { sendMessage, sendPhoto } = require("./bot");
 const { parseTzFromTelegramMessage, analyzeArchitecture } = require("./tzParser");
 const {
@@ -876,6 +876,36 @@ function getBrandPhotoUrl() {
     return `${appBaseUrl.replace(/\/$/, "")}/brand-photo`;
 }
 
+function buildDebugLogReadyMessage(logSheetUrl) {
+    return joinMessageBlocks([
+        sectionTitle("🧾", "Файл для технічних логів готовий"),
+        "Я створив окрему Google Sheets-таблицю для логів Apps Script, щоб її можна було перевірити ще до першої побудови.",
+        logSheetUrl ? `Посилання на лог-файл:\n${logSheetUrl}` : "",
+        "Шукай її в Google Drive як DEBUG_APP_SCRIPT_LOGS або відкривай за посиланням вище."
+    ]);
+}
+
+async function ensureDebugLogFileForChat(message) {
+    const identity = getTelegramIdentity(message);
+    try {
+        const response = await pingAppsScript(identity);
+        return {
+            ok: true,
+            logSheetUrl: normalizeText(response?.log_sheet_url || "")
+        };
+    } catch (error) {
+        console.error("Failed to initialize Apps Script debug log file", {
+            telegramId: identity.telegram_id,
+            telegramUsername: identity.telegram_username,
+            error: String(error?.message || error)
+        });
+        return {
+            ok: false,
+            error: String(error?.message || error)
+        };
+    }
+}
+
 function buildStatusMessage(draft) {
     const llm = getConfigSummary();
     const active = resolveActiveTable(draft);
@@ -1720,6 +1750,17 @@ async function handleTelegramUpdate(update) {
                 await sendPhoto(chatId, brandPhotoUrl, welcomeMessage);
             } else {
                 await sendMessage(chatId, welcomeMessage);
+            }
+
+            const debugLogInit = await ensureDebugLogFileForChat(message);
+            if (debugLogInit.ok && debugLogInit.logSheetUrl) {
+                await sendMessage(chatId, buildDebugLogReadyMessage(debugLogInit.logSheetUrl));
+            } else {
+                await sendMessage(chatId, joinMessageBlocks([
+                    sectionTitle("⚠️", "Не вдалося одразу підготувати лог-файл"),
+                    "Це не блокує роботу бота. Лог-таблиця спробує створитися при першому зверненні до Apps Script.",
+                    debugLogInit.error ? `Причина: ${debugLogInit.error}` : ""
+                ]));
             }
             return { handled: true, command };
         }

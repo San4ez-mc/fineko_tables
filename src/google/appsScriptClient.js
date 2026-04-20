@@ -115,8 +115,11 @@ async function callAppsScript(payload, options = {}) {
     }
 }
 
-async function pingAppsScript() {
-    return callAppsScript({ action: "ping" });
+async function pingAppsScript(payload) {
+    return callAppsScript({
+        action: "ping",
+        ...(payload || {})
+    });
 }
 
 async function buildTableViaAppsScript(payload) {
