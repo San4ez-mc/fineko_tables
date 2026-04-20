@@ -349,6 +349,36 @@ function normalizeAnswerValue(value, fallback) {
     return text || fallback || "";
 }
 
+function questionGroupKey(questionKey) {
+    return String(questionKey || "").replace(/_\d+$/, "");
+}
+
+function shouldBroadcastSingleAnswer(text, batch, answers) {
+    if (!Array.isArray(batch) || batch.length <= 1) return false;
+    if (!Array.isArray(answers) || answers.length !== 1) return false;
+
+    const source = normalizeText(text).toLowerCase();
+    if (!source) return false;
+
+    const hasExplicitNumbering = /^\s*\d+[).]/m.test(String(text || ""));
+    if (hasExplicitNumbering) return false;
+
+    const groups = new Set(batch.map((question) => questionGroupKey(question?.key)));
+    if (groups.size === 1) return true;
+
+    const samePaymentQuestion = batch.every((question) => /як проходить оплата|підзвіт|заявка через бухгалтера/i.test(String(question?.text || "")));
+    if (samePaymentQuestion && /(все|усе|всім|усім|теж|однаково|скрізь|усюди|через бухгалтера|оплачує бухгалтер)/i.test(source)) {
+        return true;
+    }
+
+    const sameMethodQuestion = batch.every((question) => /google form|окремий аркуш|як зручніше вносити/i.test(String(question?.text || "")));
+    if (sameMethodQuestion && /(все|усе|всім|усім|теж|однаково|скрізь|усюди|google form|окремий аркуш)/i.test(source)) {
+        return true;
+    }
+
+    return false;
+}
+
 function applyAnswers(draft, text) {
     const answers = splitAnswers(text);
     const batch = Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [];
@@ -365,13 +395,21 @@ function applyAnswers(draft, text) {
 
     if (batch.length === 1) {
         resolved[batch[0].key] = normalizeAnswerValue(text);
+    } else if (shouldBroadcastSingleAnswer(text, batch, answers)) {
+        batch.forEach((question) => {
+            resolved[question.key] = normalizeAnswerValue(text);
+        });
     } else {
         batch.slice(0, answers.length).forEach((question, index) => {
             resolved[question.key] = normalizeAnswerValue(answers[index]);
         });
     }
 
-    const answeredCount = batch.length === 1 ? 1 : Math.min(batch.length, answers.length);
+    const answeredCount = batch.length === 1
+        ? 1
+        : shouldBroadcastSingleAnswer(text, batch, answers)
+            ? batch.length
+            : Math.min(batch.length, answers.length);
     const queuedAfterCurrentBatch = Array.isArray(draft.questionsQueue)
         ? draft.questionsQueue.slice(batch.length)
         : [];
