@@ -351,6 +351,30 @@ function detectRoutingMode(text, parsedTz) {
     return { mode: "unknown", reportType: "" };
 }
 
+function isBuildJsonPayload(text) {
+    const json = tryParseJson(text);
+    if (!json || typeof json !== "object" || Array.isArray(json)) return false;
+
+    const action = normalizeText(json.action || "build_table").toLowerCase();
+    return action === "build_table";
+}
+
+function shouldStartNewBuildFromMessage(message, draft) {
+    const text = normalizeText(message?.text || "");
+    if (!text) return false;
+
+    if (isBuildJsonPayload(text)) return true;
+
+    const parsed = parseTzFromTelegramMessage(message);
+    if (parsed.detected) return true;
+
+    if (!resolveActiveTable(draft) && !tryParseJson(text)) {
+        return true;
+    }
+
+    return false;
+}
+
 function findNoAccessItemsWithoutMode(tz) {
     const all = [...(Array.isArray(tz?.inflows) ? tz.inflows : []), ...(Array.isArray(tz?.outflows) ? tz.outflows : [])];
     return all
@@ -1458,6 +1482,13 @@ async function handleTelegramUpdate(update) {
 
         if (draft.stage === STAGES.CONFIRMING) {
             return handleConfirmation(message, draft);
+        }
+
+        if (draft.stage === STAGES.EDITING && shouldStartNewBuildFromMessage(message, draft)) {
+            return handleTzCapture(message, {
+                ...draft,
+                stage: STAGES.IDLE
+            });
         }
 
         if (draft.stage === STAGES.EDITING) {
