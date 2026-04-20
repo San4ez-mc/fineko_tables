@@ -355,23 +355,94 @@ async function generateUpdatePayloadFromText(input) {
     };
 }
 
+function normalizeParsedItem(item = {}) {
+    const article = String(item.article || "").trim();
+    const responsible = item.responsible == null ? null : String(item.responsible || "").trim() || null;
+    const opsRaw = item.ops_per_month;
+    const opsPerMonth = Number.isFinite(Number(opsRaw)) ? Number(opsRaw) : null;
+    const hasSheetsAccess = typeof item.has_sheets_access === "boolean" ? item.has_sheets_access : null;
+    const recognitionMoment = item.recognition_moment == null ? null : String(item.recognition_moment || "").trim() || null;
+    const costType = item.cost_type == null ? null : String(item.cost_type || "").trim() || null;
+
+    return {
+        article: article || null,
+        responsible,
+        ops_per_month: opsPerMonth,
+        has_sheets_access: hasSheetsAccess,
+        recognition_moment: recognitionMoment,
+        cost_type: costType
+    };
+}
+
+function normalizeParsedReportType(value) {
+    const text = String(value || "").trim().toLowerCase();
+    return ["cashflow", "pl", "balance", "cashflow_and_pl", "dashboard"].includes(text)
+        ? text
+        : null;
+}
+
+function normalizeParsedExtraction(data = {}) {
+    return {
+        report_type: normalizeParsedReportType(data.report_type) || "cashflow",
+        business_name: String(data.business_name || "").trim() || null,
+        inflows: Array.isArray(data.inflows) ? data.inflows.map(normalizeParsedItem).filter((item) => item.article) : [],
+        outflows: Array.isArray(data.outflows) ? data.outflows.map(normalizeParsedItem).filter((item) => item.article) : [],
+        confidence_notes: Array.isArray(data.confidence_notes)
+            ? data.confidence_notes.map((item) => String(item || "").trim()).filter(Boolean)
+            : []
+    };
+}
+
+async function selfValidateFreeText(inputText, extracted) {
+    const systemPrompt = [
+        "You validate parsed financial table data extracted from Ukrainian free text.",
+        "Return only JSON.",
+        "If an article is a sentence fragment or copied text chunk, replace it with a short operation title or null.",
+        "If a responsible person is a sentence or description, replace it with a short role or null.",
+        "Do not invent details you cannot justify from the original text."
+    ].join(" ");
+
+    const userPrompt = `Original text:\n${String(inputText || "")}\n\nParsed result:\n${JSON.stringify(extracted || {}, null, 2)}\n\nReturn JSON:\n{\n  "valid": true,\n  "fixed": {\n    "report_type": "cashflow|pl|balance|cashflow_and_pl|dashboard|null",\n    "business_name": "...|null",\n    "inflows": [{"article":"...|null","responsible":"...|null","ops_per_month":0,"has_sheets_access":true,"recognition_moment":"...|null"}],\n    "outflows": [{"article":"...|null","responsible":"...|null","ops_per_month":0,"has_sheets_access":true,"cost_type":"...|null","recognition_moment":"...|null"}],\n    "confidence_notes": ["..."]\n  },\n  "issues_found": ["..."]\n}`;
+
+    const data = await callJsonTask({ systemPrompt, userPrompt });
+    return {
+        valid: Boolean(data.valid),
+        fixed: data.fixed && typeof data.fixed === "object" ? normalizeParsedExtraction(data.fixed) : null,
+        issues_found: Array.isArray(data.issues_found)
+            ? data.issues_found.map((item) => String(item || "").trim()).filter(Boolean)
+            : []
+    };
+}
+
 async function parseFreeText(input) {
     const systemPrompt = [
-        "You convert unstructured user text into TZ JSON for financial table builder.",
+        "You extract structured financial-table data from Ukrainian free text.",
         "Return only JSON.",
-        "Prefer report_type=cashflow unless clearly stated otherwise.",
+        "Prefer report_type=cashflow unless the user clearly asks for P&L, balance, or a combined cashflow_and_pl report.",
+        "Article must be a short financial operation name, usually 2-5 words, not a copied sentence.",
+        "Responsible person must be a short name or role, not a sentence.",
+        "If you are not sure, return null instead of guessing.",
         "If data is missing keep arrays empty but preserve shape."
     ].join(" ");
 
-    const userPrompt = `User text:\n${String(input || "")}\n\nReturn JSON:\n{\n  "report_type": "cashflow|pl|balance|dashboard",\n  "business_name": "...",\n  "inflows": [{"article":"...","responsible":"...","ops_per_month":0,"has_sheets_access":true}],\n  "outflows": [{"article":"...","responsible":"...","ops_per_month":0,"has_sheets_access":true}]\n}`;
+    const userPrompt = `User text:\n${String(input || "")}\n\nReturn JSON:\n{\n  "report_type": "cashflow|pl|balance|cashflow_and_pl|dashboard|null",\n  "business_name": "...|null",\n  "inflows": [{"article":"...|null","responsible":"...|null","ops_per_month":0,"has_sheets_access":true,"recognition_moment":"payment_date|act_date|accrual_date|null"}],\n  "outflows": [{"article":"...|null","responsible":"...|null","ops_per_month":0,"has_sheets_access":true,"cost_type":"cogs|opex|owner|tax|null","recognition_moment":"payment_date|act_date|accrual_date|null"}],\n  "confidence_notes": ["..."]\n}`;
 
     const data = await callJsonTask({ systemPrompt, userPrompt });
+    const extracted = normalizeParsedExtraction(data);
+    const validation = await selfValidateFreeText(input, extracted);
+
+    if (!validation.valid && validation.fixed) {
+        return {
+            ...validation.fixed,
+            _was_corrected: true,
+            _validation_issues: validation.issues_found
+        };
+    }
 
     return {
-        report_type: String(data.report_type || "cashflow").toLowerCase(),
-        business_name: String(data.business_name || "Business").trim(),
-        inflows: Array.isArray(data.inflows) ? data.inflows : [],
-        outflows: Array.isArray(data.outflows) ? data.outflows : []
+        ...extracted,
+        _was_corrected: false,
+        _validation_issues: validation.issues_found
     };
 }
 

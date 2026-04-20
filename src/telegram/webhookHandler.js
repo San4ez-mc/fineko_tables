@@ -523,16 +523,71 @@ function hasAtLeastOneArticle(tz) {
 
 function normalizeReportType(value) {
     const text = normalizeText(value).toLowerCase();
-    const allowed = ["cashflow", "pl", "balance", "dashboard"];
+    const allowed = ["cashflow", "pl", "balance", "cashflow_and_pl", "dashboard"];
     return allowed.includes(text) ? text : "";
 }
 
 function detectKnownTypeFromText(text) {
     const source = String(text || "").toLowerCase();
+    if ((/(кешфлоу|кеш\s*флоу|cash\s*flow|cashflow)/i.test(source)) && (/(p&l|\bpl\b|profit\s*(and|&)\s*loss|прибутк(и|у)?\s*і\s*збитк(и|ів))/i.test(source))) return "cashflow_and_pl";
     if (/(кешфлоу|кеш\s*флоу|кефлоу|cash\s*flow|cashflow)/i.test(source)) return "cashflow";
     if (/(p&l|\bpl\b|п\s*&\s*л|profit\s*(and|&)\s*loss|прибутк(и|у)?\s*і\s*збитк(и|ів))/i.test(source)) return "pl";
     if (/(баланс|balance)/i.test(source)) return "balance";
     if (/(дашборд|dashboard)/i.test(source)) return "dashboard";
+    return "";
+}
+
+function isPlLikeReportType(value) {
+    return ["pl", "cashflow_and_pl"].includes(normalizeReportType(value));
+}
+
+function buildArticleSeedSummary(tz = {}) {
+    const inflows = (Array.isArray(tz.inflows) ? tz.inflows : [])
+        .map((item) => normalizeText(item?.article || item?.name))
+        .filter(Boolean);
+    const outflows = (Array.isArray(tz.outflows) ? tz.outflows : [])
+        .map((item) => normalizeText(item?.article || item?.name))
+        .filter(Boolean);
+
+    const inflowsText = inflows.length > 0 ? inflows.join(", ") : "не знайшов";
+    const outflowsText = outflows.length > 0 ? outflows.join(", ") : "не знайшов";
+    return `Надходження: ${inflowsText}\nВитрати: ${outflowsText}`;
+}
+
+function parseArticlesSeedAnswer(value) {
+    const text = normalizeText(value);
+    if (!text) return null;
+
+    const inflowMatch = text.match(/надходження\s*:\s*([^\n]+)/i);
+    const outflowMatch = text.match(/витрати\s*:\s*([^\n]+)/i);
+    if (!inflowMatch && !outflowMatch) return null;
+
+    const parseList = (source) => String(source || "")
+        .split(/[;,]/)
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+        .map((article) => ({ article, responsible: "Owner", ops_per_month: 10, has_sheets_access: true }));
+
+    return {
+        inflows: parseList(inflowMatch?.[1]),
+        outflows: parseList(outflowMatch?.[1])
+    };
+}
+
+function normalizeCostTypeAnswer(value) {
+    const text = normalizeText(value).toLowerCase();
+    if (/прям|cogs|собіварт/.test(text)) return "cogs";
+    if (/операц|opex/.test(text)) return "opex";
+    if (/подат/.test(text)) return "tax";
+    if (/власник|owner/.test(text)) return "owner";
+    return "";
+}
+
+function normalizeRecognitionMomentAnswer(value) {
+    const text = normalizeText(value).toLowerCase();
+    if (/оплат/.test(text)) return "payment_date";
+    if (/акт|накладн/.test(text)) return "act_date";
+    if (/нарахув/.test(text)) return "accrual_date";
     return "";
 }
 
@@ -583,10 +638,17 @@ function findNoAccessItemsWithoutMode(tz) {
 function buildQuestionQueue(tz, _analysis, resolvedAnswers = {}, skippedKeys = [], questionsCount = 0) {
     const questions = [];
 
+    if (tz?._requires_article_confirmation && resolvedAnswers.free_text_articles_confirm === undefined) {
+        questions.push({
+            key: "free_text_articles_confirm",
+            text: `Я витягнув такі статті з твого опису. Підтверди або виправ одним повідомленням у форматі "Надходження: ... / Витрати: ...".\n${buildArticleSeedSummary(tz)}`
+        });
+    }
+
     if (!normalizeReportType(tz.report_type) && !normalizeText(resolvedAnswers.report_type)) {
         questions.push({
             key: "report_type",
-            text: "Вкажи тип таблиці: cashflow (рух грошей), pl / P&L (прибутки і збитки), balance (баланс), dashboard (зведений екран з показниками)"
+            text: "Вкажи тип таблиці: cashflow (рух грошей), pl / P&L (прибутки і збитки), cashflow_and_pl (обидва звіти в одному файлі), balance (баланс), dashboard (зведений екран з показниками)"
         });
     }
 
@@ -598,6 +660,21 @@ function buildQuestionQueue(tz, _analysis, resolvedAnswers = {}, skippedKeys = [
     }
 
     questions.push(...buildActiveQueue(tz, resolvedAnswers, skippedKeys));
+
+    if (isPlLikeReportType(tz.report_type) && resolvedAnswers.pl_project_tracking === undefined) {
+        questions.push({
+            key: "pl_project_tracking",
+            text: "Для P&L потрібен облік по проєктах чи достатньо загальної картини без проєктів?"
+        });
+    }
+
+    if (isPlLikeReportType(tz.report_type) && /^(так|yes|y|true|по\s*проєктах|з\s*проєктами)$/i.test(normalizeText(resolvedAnswers.pl_project_tracking))
+        && !normalizeText(resolvedAnswers.pl_project_list)) {
+        questions.push({
+            key: "pl_project_list",
+            text: "Переліч проєкти через кому, наприклад: Project A, Project B"
+        });
+    }
 
     const budgetLeft = Math.max(0, MAX_TOTAL_QUESTIONS - Number(questionsCount || 0));
     return questions.slice(0, budgetLeft);
@@ -648,6 +725,28 @@ function buildPayloadFromTzDraft(draft, message) {
     const outflows = (Array.isArray(tz.outflows) ? tz.outflows : [])
         .map((item) => normalizeText(item.article || item.name))
         .filter(Boolean);
+    const articleDetails = {
+        inflows: (Array.isArray(tz.inflows) ? tz.inflows : []).map((item) => ({
+            article: normalizeText(item.article || item.name),
+            responsible: normalizeText(item.responsible || item.owner || "Owner"),
+            ops_per_month: Number(item.ops_per_month) || 0,
+            has_sheets_access: item.has_sheets_access !== false,
+            recognition_moment: normalizeRecognitionMomentAnswer(item.recognition_moment) || normalizeText(item.recognition_moment) || null
+        })).filter((item) => item.article),
+        outflows: (Array.isArray(tz.outflows) ? tz.outflows : []).map((item) => ({
+            article: normalizeText(item.article || item.name),
+            responsible: normalizeText(item.responsible || item.owner || "Owner"),
+            ops_per_month: Number(item.ops_per_month) || 0,
+            has_sheets_access: item.has_sheets_access !== false,
+            cost_type: normalizeCostTypeAnswer(item.cost_type) || normalizeText(item.cost_type) || null,
+            recognition_moment: normalizeRecognitionMomentAnswer(item.recognition_moment) || normalizeText(item.recognition_moment) || null
+        })).filter((item) => item.article)
+    };
+    const projectTracking = /^(так|yes|y|true|по\s*проєктах|з\s*проєктами)$/i.test(normalizeText(answers.pl_project_tracking));
+    const projects = normalizeText(answers.pl_project_list)
+        .split(/[;,]/)
+        .map((item) => normalizeText(item))
+        .filter(Boolean);
 
     return {
         action: "build_table",
@@ -662,7 +761,12 @@ function buildPayloadFromTzDraft(draft, message) {
             outflows: draft.analysis?.outflowsMode || "A"
         },
         articles: { inflows, outflows },
+        article_details: articleDetails,
         responsible: buildResponsibleMap(tz, answers),
+        pl_settings: {
+            project_tracking: projectTracking,
+            projects
+        },
         options: {
             payment_calendar: false,
             multi_account: false,
@@ -676,6 +780,8 @@ function inferSheetsFromPayload(payload) {
     const sheets = [];
     if (payload.report_type === "cashflow") {
         sheets.push("Cashflow", "Надходження", "Витрати", "Довідники", "Налаштування", "References");
+    } else if (payload.report_type === "cashflow_and_pl") {
+        sheets.push("Cashflow", "Надходження", "Витрати", "P&L", "Доходи", "Прямі витрати", "Операційні витрати", "Довідники", "Налаштування", "References");
     } else if (payload.report_type === "pl") {
         sheets.push("P&L", "Доходи", "Прямі витрати", "Операційні витрати", "Довідники", "Налаштування", "References");
     } else if (payload.report_type === "balance") {
@@ -1301,23 +1407,39 @@ function applyCriticalAnswerSideEffects(draft, updatedAnswers) {
         extracted.report_type = answeredType;
     }
 
-    if (!hasAtLeastOneArticle(extracted) && normalizeText(answers.articles_seed)) {
-        const seed = answers.articles_seed;
-        const inflowMatch = String(seed).match(/надходження\s*:\s*([^\n]+)/i);
-        const outflowMatch = String(seed).match(/витрати\s*:\s*([^\n]+)/i);
-        const parseList = (value) => String(value || "")
-            .split(/[;,]/)
-            .map((v) => normalizeText(v))
-            .filter(Boolean)
-            .map((article) => ({ article, responsible: "Owner", ops_per_month: 10, has_sheets_access: true }));
-
-        const inflows = parseList(inflowMatch?.[1]);
-        const outflows = parseList(outflowMatch?.[1]);
-        if (inflows.length || outflows.length) {
-            extracted.inflows = inflows;
-            extracted.outflows = outflows;
+    const freeTextConfirmation = normalizeText(answers.free_text_articles_confirm);
+    if (freeTextConfirmation) {
+        if (asYesNo(freeTextConfirmation)) {
+            extracted._articles_confirmed = true;
+        } else {
+            const correctedArticles = parseArticlesSeedAnswer(freeTextConfirmation);
+            if (correctedArticles && (correctedArticles.inflows.length || correctedArticles.outflows.length)) {
+                extracted.inflows = correctedArticles.inflows;
+                extracted.outflows = correctedArticles.outflows;
+                extracted._articles_confirmed = true;
+            }
         }
     }
+
+    if (!hasAtLeastOneArticle(extracted) && normalizeText(answers.articles_seed)) {
+        const correctedArticles = parseArticlesSeedAnswer(answers.articles_seed);
+        if (correctedArticles && (correctedArticles.inflows.length || correctedArticles.outflows.length)) {
+            extracted.inflows = correctedArticles.inflows;
+            extracted.outflows = correctedArticles.outflows;
+        }
+    }
+
+    (Array.isArray(extracted.outflows) ? extracted.outflows : []).forEach((item, index) => {
+        const costType = normalizeCostTypeAnswer(answers[`cost_type_${index}`]);
+        if (costType) {
+            item.cost_type = costType;
+        }
+
+        const recognitionMoment = normalizeRecognitionMomentAnswer(answers[`recognition_moment_${index}`]);
+        if (recognitionMoment) {
+            item.recognition_moment = recognitionMoment;
+        }
+    });
 
     return extracted;
 }
@@ -1326,6 +1448,9 @@ function ensureBuildMinimum(tz) {
     const next = { ...(tz || {}) };
     if (!normalizeReportType(next.report_type)) {
         next.report_type = "cashflow";
+    }
+    if (next._requires_article_confirmation && next._articles_confirmed !== true) {
+        next._articles_confirmed = false;
     }
 
     const inflows = Array.isArray(next.inflows) ? next.inflows : [];
@@ -1351,6 +1476,13 @@ function deterministicPayloadSelfCheck(payload) {
             missing.push(`input_mode:${article}`);
         }
     });
+
+    if (payload?.report_type === "cashflow_and_pl" && payload?.pl_settings?.project_tracking === true) {
+        const projects = Array.isArray(payload?.pl_settings?.projects) ? payload.pl_settings.projects : [];
+        if (projects.length === 0) {
+            missing.push("pl_projects");
+        }
+    }
 
     return {
         ready: missing.length === 0,
@@ -1454,6 +1586,10 @@ async function handleTzCapture(message, draft) {
         inflows: [{ article: "Оплата від клієнтів", responsible: "Owner", ops_per_month: 20, has_sheets_access: true }],
         outflows: [{ article: "Операційні витрати", responsible: "Owner", ops_per_month: 20, has_sheets_access: true }]
     };
+    if (inputMode === "free_text") {
+        preparedTz._requires_article_confirmation = true;
+        preparedTz._articles_confirmed = false;
+    }
 
     const analysis = analyzeArchitecture(preparedTz);
     const businessNameResolved = await resolveBusinessName(preparedTz, text, message, draft, chatId);

@@ -14,6 +14,10 @@ function hasNoSheetsAccess(item) {
     return item && item.has_sheets_access === false;
 }
 
+function reportTypeOf(extracted) {
+    return normalizeText(extracted?.report_type).toLowerCase();
+}
+
 function moneyFlowCondition(resolvedAnswers, extracted, index) {
     const item = extracted?.outflows?.[index];
     if (!hasNoSheetsAccess(item)) return false;
@@ -25,6 +29,18 @@ function methodCondition(resolvedAnswers, extracted, index) {
     if (!hasNoSheetsAccess(item)) return false;
     return resolvedAnswers[`money_flow_${index}`] === "accountable"
         && resolvedAnswers[`no_access_method_${index}`] === undefined;
+}
+
+function plCostTypeCondition(resolvedAnswers, extracted, index) {
+    const reportType = reportTypeOf(extracted);
+    if (!["pl", "cashflow_and_pl"].includes(reportType)) return false;
+    return resolvedAnswers[`cost_type_${index}`] === undefined;
+}
+
+function plRecognitionCondition(resolvedAnswers, extracted, index) {
+    const reportType = reportTypeOf(extracted);
+    if (!["pl", "cashflow_and_pl"].includes(reportType)) return false;
+    return resolvedAnswers[`recognition_moment_${index}`] === undefined;
 }
 
 const questionGraph = {
@@ -47,6 +63,28 @@ const questionGraph = {
             return {
                 text: `${articleName(item)} — ${articlePerson(item)} розраховується сам. Як зручніше фіксувати витрати?`,
                 options: ["Google Form", "Окремий аркуш"]
+            };
+        }
+    },
+    "cost_type_{i}": {
+        depends: null,
+        condition: plCostTypeCondition,
+        generate: (context, index) => {
+            const item = context?.outflows?.[index] || {};
+            return {
+                text: `${articleName(item)} — це прямі витрати на продукт/послугу, операційні витрати, податки чи витрати власника?`,
+                options: ["Прямі витрати", "Операційні витрати", "Податки", "Власник"]
+            };
+        }
+    },
+    "recognition_moment_{i}": {
+        depends: null,
+        condition: plRecognitionCondition,
+        generate: (context, index) => {
+            const item = context?.outflows?.[index] || {};
+            return {
+                text: `${articleName(item)} — коли визнавати цю статтю в P&L: по оплаті, по акту/накладній чи по нарахуванню?`,
+                options: ["По оплаті", "По акту / накладній", "По нарахуванню"]
             };
         }
     }

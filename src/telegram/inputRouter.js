@@ -6,7 +6,7 @@ function looksLikeStructuredTz(text) {
     const source = String(text || "");
     if (!source.trim()) return false;
     if (/```\s*tz\s*\n/i.test(source)) return true;
-    return /(business_name\s*:|report_type\s*:|inflows\s*:|outflows\s*:)/i.test(source);
+    return /(business_name\s*:|report_type\s*:|inflows\s*:|outflows\s*:|assets\s*:|liabilities\s*:|equity\s*:)/i.test(source);
 }
 
 function classifyInput(text, state = {}) {

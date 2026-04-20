@@ -149,7 +149,7 @@ function parseTzLikeText(text) {
         };
     }
 
-    const looksLikeTz = /(business_name\s*:|report_type\s*:|inflows\s*:|outflows\s*:)/i.test(source);
+    const looksLikeTz = /(business_name\s*:|report_type\s*:|inflows\s*:|outflows\s*:|assets\s*:|liabilities\s*:|equity\s*:)/i.test(source);
     if (!looksLikeTz) {
         return {
             detected: false,

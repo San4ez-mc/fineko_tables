@@ -384,6 +384,9 @@ function buildTable(payload) {
     if (reportType === 'cashflow') {
       logInfo_('build_table.build_cashflow', 'Building cashflow workbook', {});
       buildCashflow_(context);
+    } else if (reportType === 'cashflow_and_pl') {
+      logInfo_('build_table.build_cashflow_and_pl', 'Building combined cashflow and P&L workbook', {});
+      buildCashflowAndPl_(context);
     } else if (reportType === 'pl') {
       logInfo_('build_table.build_pl', 'Building P&L workbook', {});
       buildPl_(context);
@@ -569,6 +572,15 @@ function validateTableAction(payload) {
   var errors = [];
   var warnings = [];
   var names = ss.getSheets().map(function(s) { return s.getName(); });
+  var inferredReportType = names.indexOf('📊 Cashflow') >= 0 && names.indexOf('📊 P&L') >= 0
+    ? 'cashflow_and_pl'
+    : names.indexOf('📊 Cashflow') >= 0
+      ? 'cashflow'
+      : names.indexOf('📊 P&L') >= 0
+        ? 'pl'
+        : names.indexOf('📊 Баланс') >= 0
+          ? 'balance'
+          : 'dashboard';
 
   if (names.length === 0) {
     errors.push('Файл не містить аркушів');
@@ -620,6 +632,18 @@ function validateTableAction(payload) {
     });
   });
 
+  if (inferredReportType === 'cashflow_and_pl') {
+    var refSheet = ss.getSheetByName('📋 Довідники');
+    if (!refSheet) {
+      errors.push('Відсутній аркуш: 📋 Довідники');
+    } else {
+      var headers = refSheet.getRange(1, 1, 1, Math.max(refSheet.getLastColumn(), 4)).getDisplayValues()[0];
+      if (headers.indexOf('cost_type') === -1) {
+        errors.push('В Довідниках відсутня колонка cost_type');
+      }
+    }
+  }
+
   var inputSheet = ss.getSheetByName('⬇️ Надходження') || ss.getSheetByName('⬆️ Витрати');
   if (inputSheet && inputSheet.getLastRow() <= 1) {
     warnings.push('Аркуш введення порожній — тестові дані не додались');
@@ -660,7 +684,7 @@ function validatePayload(payload) {
     throw new Error('Відсутні обов\'язкові поля: ' + missing.join(', '));
   }
 
-  var validTypes = ['cashflow', 'pl', 'balance', 'dashboard'];
+  var validTypes = ['cashflow', 'pl', 'balance', 'cashflow_and_pl', 'dashboard'];
   if (validTypes.indexOf(String(payload.report_type).toLowerCase()) === -1) {
     throw new Error('Невідомий тип таблиці: ' + payload.report_type);
   }
@@ -827,6 +851,70 @@ function buildPl_(ctx) {
   });
 }
 
+function buildCashflowAndPl_(ctx) {
+  var ss = ctx.spreadsheet;
+  var payload = ctx.payload;
+  var articles = payload.articles || {};
+  var responsible = payload.responsible || {};
+  var options = payload.options || {};
+  var plSettings = payload.pl_settings || {};
+  var projectTracking = !!plSettings.project_tracking;
+  var projects = Array.isArray(plSettings.projects) ? plSettings.projects.filter(Boolean) : [];
+  var columnMap = buildCombinedColumnMap_(projectTracking);
+
+  renameDefaultSheet_(ss, '📊 Cashflow');
+  ctx.sheetsBuilt = ['📊 Cashflow'];
+
+  var inflowsSheet = ensureSheet_(ss, '⬇️ Надходження');
+  setupCombinedInflowSheet_(inflowsSheet, projectTracking);
+  addCombinedTestData_(inflowsSheet, articles.inflows || [], true, projectTracking, projects);
+  ctx.sheetsBuilt.push('⬇️ Надходження');
+
+  var outflowsSheet = ensureSheet_(ss, '⬆️ Витрати');
+  setupCombinedOutflowSheet_(outflowsSheet, projectTracking);
+  addCombinedTestData_(outflowsSheet, articles.outflows || [], false, projectTracking, projects);
+  ctx.sheetsBuilt.push('⬆️ Витрати');
+
+  var directories = ensureSheet_(ss, '📋 Довідники');
+  setupDirectories_(ss, directories, articles, responsible, options, payload.article_details, plSettings);
+  ctx.sheetsBuilt.push('📋 Довідники');
+
+  var settings = ensureSheet_(ss, '⚙️ Налаштування');
+  setupSettingsSheet_(settings, payload.business_name);
+  ctx.sheetsBuilt.push('⚙️ Налаштування');
+
+  var refs = ensureSheet_(ss, '🔗 References');
+  setupReferencesSheet_(refs, ss.getUrl(), ss.getUrl(), '');
+  ctx.sheetsBuilt.push('🔗 References');
+
+  var plSheet = ensureSheet_(ss, '📊 P&L');
+  setupCombinedPlSummary_(plSheet, projectTracking, projects, columnMap);
+  protectSheet_(plSheet, 'Зведений аркуш P&L');
+  plSheet.setFrozenColumns(1);
+  ctx.sheetsBuilt.push('📊 P&L');
+
+  var cashflow = ss.getSheetByName('📊 Cashflow');
+  setupCombinedCashflowSummary_(cashflow, articles, columnMap);
+  protectSheet_(cashflow, 'Зведений аркуш Cashflow');
+  cashflow.setFrozenColumns(1);
+
+  ['⬇️ Надходження', '⬆️ Витрати'].forEach(function(name) {
+    var sh = ss.getSheetByName(name);
+    if (sh) {
+      autoResizeAllColumns(sh);
+      trimSheet(sh, 200, Math.max(sh.getLastColumn() + 1, 8));
+    }
+  });
+
+  ['📊 Cashflow', '📊 P&L', '📋 Довідники', '⚙️ Налаштування', '🔗 References'].forEach(function(name) {
+    var sh = ss.getSheetByName(name);
+    if (sh) {
+      autoResizeAllColumns(sh);
+      trimSheet(sh, Math.max(sh.getLastRow() + 5, 20), Math.max(sh.getLastColumn() + 1, 8));
+    }
+  });
+}
+
 function buildBalance_(ctx) {
   var ss = ctx.spreadsheet;
   renameDefaultSheet_(ss, '📊 Баланс');
@@ -870,6 +958,191 @@ function setupPlSummary_(sheet) {
 
   sheet.getRange('B2:B6').setNumberFormat('# ##0.00');
   sheet.setFrozenRows(1);
+}
+
+function buildCombinedColumnMap_(projectTracking) {
+  return {
+    paymentDate: 1,
+    recognitionDate: 2,
+    counterparty: 3,
+    article: 4,
+    costType: 5,
+    project: projectTracking ? 6 : 0,
+    amount: projectTracking ? 7 : 6,
+    comment: projectTracking ? 8 : 7
+  };
+}
+
+function setupCombinedInflowSheet_(sheet, projectTracking) {
+  var headers = [['Дата оплати', 'Дата визнання', 'Контрагент', 'Стаття']];
+  if (projectTracking) headers[0].push('Проєкт');
+  headers[0].push('Сума');
+  headers[0].push('Коментар');
+
+  sheet.clear();
+  sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
+  sheet.setFrozenRows(1);
+  sheet.getRange('A:B').setNumberFormat('dd.mm.yyyy');
+  var amountCol = projectTracking ? 'F:F' : 'E:E';
+  sheet.getRange(amountCol).setNumberFormat('# ##0.00');
+
+  applyArticleDropdown_(sheet, 4, 'articles_inflows');
+  if (projectTracking) applyArticleDropdown_(sheet, 5, 'projects_list');
+  sheet.getRange(2, 2, 999, 1).setFormulaR1C1('=IF(R[0]C[-1]="","",R[0]C[-1])');
+
+  protectHeader_(sheet);
+}
+
+function setupCombinedOutflowSheet_(sheet, projectTracking) {
+  var headers = [['Дата оплати', 'Дата визнання', 'Контрагент', 'Стаття', 'cost_type']];
+  if (projectTracking) headers[0].push('Проєкт');
+  headers[0].push('Сума');
+  headers[0].push('Коментар');
+
+  sheet.clear();
+  sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
+  sheet.setFrozenRows(1);
+  sheet.getRange('A:B').setNumberFormat('dd.mm.yyyy');
+  var amountCol = projectTracking ? 'G:G' : 'F:F';
+  sheet.getRange(amountCol).setNumberFormat('# ##0.00');
+
+  applyArticleDropdown_(sheet, 4, 'articles_outflows');
+  if (projectTracking) applyArticleDropdown_(sheet, 6, 'projects_list');
+  sheet.getRange(2, 2, 999, 1).setFormulaR1C1('=IF(R[0]C[-1]="","",R[0]C[-1])');
+  syncCombinedOutflowDerivedColumns_(sheet);
+
+  protectHeader_(sheet);
+}
+
+function syncCombinedOutflowDerivedColumns_(sheet) {
+  sheet.getRange(2, 5, 999, 1).setFormulaR1C1('=IF(R[0]C[-1]="","",IFERROR(VLOOKUP(R[0]C[-1],\'📋 Довідники\'!C:D,2,false),""))');
+}
+
+function addCombinedTestData_(sheet, articles, isInflow, projectTracking, projects) {
+  var list = Array.isArray(articles) ? articles.filter(Boolean) : [];
+  if (!list.length) return;
+
+  var testArticle = list[0];
+  var now = new Date();
+  var d1 = new Date(now.getFullYear(), now.getMonth(), 1);
+  var d2 = new Date(now.getFullYear(), now.getMonth(), 15);
+  var project = projectTracking && projects.length ? projects[0] : '';
+  var rows = [];
+
+  if (isInflow) {
+    rows = [
+      [d1, d1, 'Тестовий клієнт А', testArticle].concat(projectTracking ? [project] : []).concat([10000, 'Тестовий запис — видали перед використанням']),
+      [d2, d2, 'Тестовий клієнт Б', testArticle].concat(projectTracking ? [project] : []).concat([5000, 'Тестовий запис — видали перед використанням'])
+    ];
+  } else {
+    rows = [
+      [d1, d1, 'Тестовий постачальник А', testArticle, ''].concat(projectTracking ? [project] : []).concat([3000, 'Тестовий запис — видали перед використанням']),
+      [d2, d2, 'Тестовий постачальник Б', testArticle, ''].concat(projectTracking ? [project] : []).concat([2000, 'Тестовий запис — видали перед використанням'])
+    ];
+  }
+
+  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange(2, 1, rows.length, rows[0].length)
+    .setBackground('#FFF9C4')
+    .setNote('Тестовий рядок — видали перед реальним використанням');
+  if (!isInflow) {
+    syncCombinedOutflowDerivedColumns_(sheet);
+  }
+}
+
+function setupCombinedCashflowSummary_(sheet, articles, columnMap) {
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 4).setValues([['Стаття', 'Надходження', 'Витрати', 'Чистий Cashflow']]);
+
+  var inflows = Array.isArray(articles.inflows) ? articles.inflows : [];
+  var outflows = Array.isArray(articles.outflows) ? articles.outflows : [];
+  var rows = [];
+
+  inflows.forEach(function(article) { rows.push([article, '', '', '']); });
+  outflows.forEach(function(article) { rows.push([article, '', '', '']); });
+
+  if (rows.length) {
+    sheet.getRange(2, 1, rows.length, 4).setValues(rows);
+  }
+
+  for (var r = 2; r < 2 + rows.length; r++) {
+    var inflowFormula = '=SUMIF(\'⬇️ Надходження\'!' + columnToLetter_(columnMap.article) + ':' + columnToLetter_(columnMap.article) + ',A' + r + ',\'⬇️ Надходження\'!' + columnToLetter_(columnMap.amount) + ':' + columnToLetter_(columnMap.amount) + ')';
+    var outflowFormula = '=SUMIF(\'⬆️ Витрати\'!' + columnToLetter_(columnMap.article) + ':' + columnToLetter_(columnMap.article) + ',A' + r + ',\'⬆️ Витрати\'!' + columnToLetter_(columnMap.amount) + ':' + columnToLetter_(columnMap.amount) + ')';
+    sheet.getRange(r, 2).setFormula(inflowFormula);
+    sheet.getRange(r, 3).setFormula(outflowFormula);
+    sheet.getRange(r, 4).setFormula('=B' + r + '-C' + r);
+  }
+
+  var totalRow = 2 + rows.length + 1;
+  sheet.getRange(totalRow, 1, 4, 2).setValues([
+    ['Загальні надходження', '=SUM(B2:B' + (totalRow - 2) + ')'],
+    ['Загальні виплати', '=SUM(C2:C' + (totalRow - 2) + ')'],
+    ['Чистий Cashflow', '=B' + totalRow + '-B' + (totalRow + 1)],
+    ['Залишок', '=\'' + SETTINGS_SHEET_NAME + '\'!B4+B' + (totalRow + 2)]
+  ]);
+  sheet.setFrozenRows(1);
+}
+
+function setupCombinedPlSummary_(sheet, projectTracking, projects, columnMap) {
+  sheet.clear();
+  var headers = ['Показник', 'Загально'];
+  if (projectTracking && projects.length) {
+    headers = ['Показник'].concat(projects).concat(['Загально']);
+  }
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  var labels = [
+    ['Дохід'],
+    ['Собівартість (COGS)'],
+    ['Валовий прибуток'],
+    ['Операційні витрати'],
+    ['Операційний прибуток'],
+    ['Виплати власнику'],
+    ['Податки'],
+    ['Чистий прибуток']
+  ];
+  sheet.getRange(2, 1, labels.length, 1).setValues(labels);
+
+  if (!projectTracking || !projects.length) {
+    fillCombinedPlColumn_(sheet, 2, '', columnMap);
+  } else {
+    for (var index = 0; index < projects.length; index++) {
+      fillCombinedPlColumn_(sheet, 2 + index, projects[index], columnMap);
+    }
+    fillCombinedPlColumn_(sheet, 2 + projects.length, '', columnMap);
+  }
+
+  sheet.getRange(2, 2, labels.length, Math.max(headers.length - 1, 1)).setNumberFormat('# ##0.00');
+  sheet.setFrozenRows(1);
+}
+
+function fillCombinedPlColumn_(sheet, column, projectName, columnMap) {
+  var inflowRange = '\'⬇️ Надходження\'!';
+  var outflowRange = '\'⬆️ Витрати\'!';
+  var amountCol = columnToLetter_(columnMap.amount);
+  var recognitionCol = columnToLetter_(columnMap.recognitionDate);
+  var costTypeCol = columnToLetter_(columnMap.costType);
+  var projectFormulaPartInflow = '';
+  var projectFormulaPartOutflow = '';
+
+  if (columnMap.project && projectName) {
+    var projectCol = columnToLetter_(columnMap.project);
+    projectFormulaPartInflow = ', ' + inflowRange + projectCol + ':' + projectCol + ', ' + quoteFormulaText_(projectName);
+    projectFormulaPartOutflow = ', ' + outflowRange + projectCol + ':' + projectCol + ', ' + quoteFormulaText_(projectName);
+  }
+
+  sheet.getRange(2, column).setFormula('=SUMIFS(' + inflowRange + amountCol + ':' + amountCol + ',' + inflowRange + recognitionCol + ':' + recognitionCol + ',">0"' + projectFormulaPartInflow + ')');
+  sheet.getRange(3, column).setFormula('=SUMIFS(' + outflowRange + amountCol + ':' + amountCol + ',' + outflowRange + costTypeCol + ':' + costTypeCol + ',"cogs",' + outflowRange + recognitionCol + ':' + recognitionCol + ',">0"' + projectFormulaPartOutflow + ')');
+  sheet.getRange(4, column).setFormula('=' + columnToLetter_(column) + '2-' + columnToLetter_(column) + '3');
+  sheet.getRange(5, column).setFormula('=SUMIFS(' + outflowRange + amountCol + ':' + amountCol + ',' + outflowRange + costTypeCol + ':' + costTypeCol + ',"opex",' + outflowRange + recognitionCol + ':' + recognitionCol + ',">0"' + projectFormulaPartOutflow + ')');
+  sheet.getRange(6, column).setFormula('=' + columnToLetter_(column) + '4-' + columnToLetter_(column) + '5');
+  sheet.getRange(7, column).setFormula('=SUMIFS(' + outflowRange + amountCol + ':' + amountCol + ',' + outflowRange + costTypeCol + ':' + costTypeCol + ',"owner",' + outflowRange + recognitionCol + ':' + recognitionCol + ',">0"' + projectFormulaPartOutflow + ')');
+  sheet.getRange(8, column).setFormula('=SUMIFS(' + outflowRange + amountCol + ':' + amountCol + ',' + outflowRange + costTypeCol + ':' + costTypeCol + ',"tax",' + outflowRange + recognitionCol + ':' + recognitionCol + ',">0"' + projectFormulaPartOutflow + ')');
+  sheet.getRange(9, column).setFormula('=' + columnToLetter_(column) + '6-' + columnToLetter_(column) + '7-' + columnToLetter_(column) + '8');
+}
+
+function quoteFormulaText_(value) {
+  return '"' + String(value || '').replace(/"/g, '""') + '"';
 }
 
 function setupInputSheet_(sheet, namedRangeName) {
@@ -926,14 +1199,14 @@ function setupLogSheet_(sheet) {
   sheet.setFrozenRows(1);
 }
 
-function setupReferencesSheet_(sheet, cashflowUrl) {
+function setupReferencesSheet_(sheet, cashflowUrl, plUrl, balanceUrl) {
   sheet.clear();
   sheet.getRange('A1').setValue('cashflow_url');
   sheet.getRange('B1').setValue(cashflowUrl || '');
   sheet.getRange('A2').setValue('pl_url');
-  sheet.getRange('B2').setValue('');
+  sheet.getRange('B2').setValue(plUrl || '');
   sheet.getRange('A3').setValue('balance_url');
-  sheet.getRange('B3').setValue('');
+  sheet.getRange('B3').setValue(balanceUrl || '');
 }
 
 function setupSettingsSheet_(sheet, businessName) {
@@ -951,18 +1224,22 @@ function setupSettingsSheet_(sheet, businessName) {
   sheet.getRange('B7').setNumberFormat('dd.mm.yyyy hh:mm');
 }
 
-function setupDirectories_(ss, sheet, articles, responsible, options) {
+function setupDirectories_(ss, sheet, articles, responsible, options, articleDetails, plSettings) {
   sheet.clear();
   sheet.getRange('A1').setValue('Статті надходжень');
   sheet.getRange('C1').setValue('Статті витрат');
+  sheet.getRange('D1').setValue('cost_type');
   sheet.getRange('E1').setValue('Відповідальні');
   sheet.getRange('G1').setValue('Контрагенти');
+  sheet.getRange('I1').setValue('Проєкти');
 
   var inflows = Array.isArray(articles.inflows) ? articles.inflows : [];
   var outflows = Array.isArray(articles.outflows) ? articles.outflows : [];
+  var outflowDetails = Array.isArray(articleDetails && articleDetails.outflows) ? articleDetails.outflows : [];
   var responsibleNames = uniqueValues_(Object.keys(responsible).map(function(article) {
     return (responsible[article] && responsible[article].name) || '';
   }).filter(Boolean));
+  var projects = Array.isArray(plSettings && plSettings.projects) ? plSettings.projects.filter(Boolean) : [];
 
   if (inflows.length) {
     sheet.getRange(2, 1, inflows.length, 1).setValues(inflows.map(function(v) { return [v]; }));
@@ -970,8 +1247,16 @@ function setupDirectories_(ss, sheet, articles, responsible, options) {
   if (outflows.length) {
     sheet.getRange(2, 3, outflows.length, 1).setValues(outflows.map(function(v) { return [v]; }));
   }
+  if (outflowDetails.length) {
+    sheet.getRange(2, 4, outflowDetails.length, 1).setValues(outflowDetails.map(function(item) {
+      return [item && item.cost_type ? item.cost_type : 'opex'];
+    }));
+  }
   if (responsibleNames.length) {
     sheet.getRange(2, 5, responsibleNames.length, 1).setValues(responsibleNames.map(function(v) { return [v]; }));
+  }
+  if (projects.length) {
+    sheet.getRange(2, 9, projects.length, 1).setValues(projects.map(function(v) { return [v]; }));
   }
 
   if (options && options.counterparty_tracking) {
@@ -981,6 +1266,9 @@ function setupDirectories_(ss, sheet, articles, responsible, options) {
   createNamedRange(ss, sheet, 'articles_inflows', 2, 1, Math.max(inflows.length, 1));
   createNamedRange(ss, sheet, 'articles_outflows', 2, 3, Math.max(outflows.length, 1));
   createNamedRange(ss, sheet, 'responsible_list', 2, 5, Math.max(responsibleNames.length, 1));
+  if (projects.length) {
+    createNamedRange(ss, sheet, 'projects_list', 2, 9, Math.max(projects.length, 1));
+  }
 
   if (options && options.counterparty_tracking) {
     createNamedRange(ss, sheet, 'counterparties', 2, 7, 1);
@@ -1100,7 +1388,7 @@ function validateBuiltFile(spreadsheet, payload) {
   });
 
   var namedRanges = spreadsheet.getNamedRanges().map(function(nr) { return nr.getName(); });
-  if (reportType === 'cashflow') {
+  if (reportType === 'cashflow' || reportType === 'cashflow_and_pl') {
     ['articles_inflows', 'articles_outflows'].forEach(function(name) {
       if (namedRanges.indexOf(name) === -1) {
         errors.push('Відсутній named range: ' + name);
@@ -1108,13 +1396,28 @@ function validateBuiltFile(spreadsheet, payload) {
     });
   }
 
-  if (reportType === 'cashflow') {
-    var mainSheet = spreadsheet.getSheetByName('📊 Cashflow') || spreadsheet.getSheets()[0];
-    var formulas = mainSheet.getDataRange().getFormulas().reduce(function(acc, row) {
-      return acc.concat(row);
-    }, []).filter(function(f) { return f !== ''; });
-    if (formulas.length === 0) {
-      errors.push('Зведений аркуш не містить формул');
+  if (reportType === 'cashflow' || reportType === 'cashflow_and_pl' || reportType === 'pl') {
+    var mainNames = reportType === 'pl' ? ['📊 P&L'] : reportType === 'cashflow_and_pl' ? ['📊 Cashflow', '📊 P&L'] : ['📊 Cashflow'];
+    mainNames.forEach(function(mainName) {
+      var mainSheet = spreadsheet.getSheetByName(mainName) || spreadsheet.getSheets()[0];
+      var formulas = mainSheet.getDataRange().getFormulas().reduce(function(acc, row) {
+        return acc.concat(row);
+      }, []).filter(function(f) { return f !== ''; });
+      if (formulas.length === 0) {
+        errors.push('Зведений аркуш не містить формул: ' + mainName);
+      }
+    });
+  }
+
+  if (reportType === 'cashflow_and_pl') {
+    var directories = spreadsheet.getSheetByName('📋 Довідники');
+    if (!directories) {
+      errors.push('Відсутній аркуш: 📋 Довідники');
+    } else {
+      var headers = directories.getRange(1, 1, 1, Math.max(directories.getLastColumn(), 4)).getDisplayValues()[0];
+      if (headers.indexOf('cost_type') === -1) {
+        errors.push('В Довідниках відсутня колонка cost_type');
+      }
     }
   }
 
@@ -1322,6 +1625,10 @@ function getRequiredSheets_(payload, reportType) {
     return uniqueValues_(list);
   }
 
+  if (reportType === 'cashflow_and_pl') {
+    return ['📊 Cashflow', '📊 P&L', '⬇️ Надходження', '⬆️ Витрати', '📋 Довідники', '⚙️ Налаштування', '🔗 References'];
+  }
+
   if (reportType === 'pl') {
     return ['📊 P&L', '💰 Доходи', '💸 Прямі витрати', '💸 Операційні витрати', '📋 Довідники', '⚙️ Налаштування', '🔗 References'];
   }
@@ -1410,6 +1717,7 @@ function renameDefaultSheet_(ss, title) {
 
 function titleByType_(reportType) {
   if (reportType === 'cashflow') return 'Cashflow';
+  if (reportType === 'cashflow_and_pl') return 'Cashflow_P&L';
   if (reportType === 'pl') return 'P&L';
   if (reportType === 'balance') return 'Баланс';
   return 'Dashboard';
