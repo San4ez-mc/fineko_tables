@@ -6,6 +6,7 @@ const {
     isEnabled: isLlmEnabled,
     getConfigSummary,
     generateClarificationBundle,
+    generateClarificationAnswerResolution,
     generateUpdatePayloadFromText,
     generateTzFromFreeText,
     generateBusinessNameFromText,
@@ -385,6 +386,58 @@ function questionGroupKey(questionKey) {
     return String(questionKey || "").replace(/_\d+$/, "");
 }
 
+function isPaymentQuestion(question) {
+    return /^money_flow_\d+$/.test(String(question?.key || ""));
+}
+
+function isMethodQuestion(question) {
+    return /^no_access_method_\d+$/.test(String(question?.key || ""));
+}
+
+function extractQuestionIndex(questionKey) {
+    const match = String(questionKey || "").match(/_(\d+)$/);
+    return match ? Number(match[1]) : -1;
+}
+
+function isCentralizedPaymentAnswer(value) {
+    const text = normalizeText(value).toLowerCase();
+    return /(через бухгалтера|оплачує бухгалтер|бухгалтер оплачує|централізовано|не сам|не сама)/i.test(text);
+}
+
+function isUniversalAnswer(value) {
+    const text = normalizeText(value).toLowerCase();
+    return /(все|усе|всім|усім|теж|однаково|скрізь|усюди)/i.test(text);
+}
+
+function shouldApplyGlobalCentralizedAnswer(text, batch, answers) {
+    if (!Array.isArray(batch) || batch.length === 0) return false;
+    if (!Array.isArray(answers) || answers.length !== 1) return false;
+
+    const raw = String(text || "");
+    if (/^\s*\d+[).]/m.test(raw)) return false;
+
+    return batch.some(isPaymentQuestion) && isUniversalAnswer(text) && isCentralizedPaymentAnswer(text);
+}
+
+function pruneResolvedQuestions(queue, resolvedAnswers) {
+    const list = Array.isArray(queue) ? queue : [];
+    return list.filter((question) => {
+        if (resolvedAnswers[question.key]) {
+            return false;
+        }
+
+        if (isMethodQuestion(question)) {
+            const index = extractQuestionIndex(question.key);
+            const paymentAnswer = resolvedAnswers[`money_flow_${index}`];
+            if (isCentralizedPaymentAnswer(paymentAnswer)) {
+                return false;
+            }
+        }
+
+        return true;
+    });
+}
+
 function shouldBroadcastSingleAnswer(text, batch, answers) {
     if (!Array.isArray(batch) || batch.length <= 1) return false;
     if (!Array.isArray(answers) || answers.length !== 1) return false;
@@ -398,12 +451,12 @@ function shouldBroadcastSingleAnswer(text, batch, answers) {
     const groups = new Set(batch.map((question) => questionGroupKey(question?.key)));
     if (groups.size === 1) return true;
 
-    const samePaymentQuestion = batch.every((question) => /як проходить оплата|підзвіт|заявка через бухгалтера/i.test(String(question?.text || "")));
+    const samePaymentQuestion = batch.every(isPaymentQuestion);
     if (samePaymentQuestion && /(все|усе|всім|усім|теж|однаково|скрізь|усюди|через бухгалтера|оплачує бухгалтер)/i.test(source)) {
         return true;
     }
 
-    const sameMethodQuestion = batch.every((question) => /google form|окремий аркуш|як зручніше вносити/i.test(String(question?.text || "")));
+    const sameMethodQuestion = batch.every(isMethodQuestion);
     if (sameMethodQuestion && /(все|усе|всім|усім|теж|однаково|скрізь|усюди|google form|окремий аркуш)/i.test(source)) {
         return true;
     }
@@ -414,12 +467,13 @@ function shouldBroadcastSingleAnswer(text, batch, answers) {
 function applyAnswers(draft, text) {
     const answers = splitAnswers(text);
     const batch = Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [];
+    const fullQueue = Array.isArray(draft.questionsQueue) ? draft.questionsQueue : [];
     const resolved = { ...(draft.answers || {}) };
 
     if (batch.length === 0) {
         return {
             answers: resolved,
-            questionsQueue: Array.isArray(draft.questionsQueue) ? draft.questionsQueue : [],
+            questionsQueue: fullQueue,
             pendingQuestions: [],
             answeredCount: 0
         };
@@ -437,15 +491,20 @@ function applyAnswers(draft, text) {
         });
     }
 
+    if (shouldApplyGlobalCentralizedAnswer(text, batch, answers)) {
+        fullQueue.forEach((question) => {
+            if (isPaymentQuestion(question)) {
+                resolved[question.key] = normalizeAnswerValue(text);
+            }
+        });
+    }
+
     const answeredCount = batch.length === 1
         ? 1
         : shouldBroadcastSingleAnswer(text, batch, answers)
             ? batch.length
             : Math.min(batch.length, answers.length);
-    const queuedAfterCurrentBatch = Array.isArray(draft.questionsQueue)
-        ? draft.questionsQueue.slice(batch.length)
-        : [];
-    const remainingQueue = batch.slice(answeredCount).concat(queuedAfterCurrentBatch);
+    const remainingQueue = pruneResolvedQuestions(fullQueue, resolved);
 
     return {
         answers: resolved,
@@ -453,6 +512,45 @@ function applyAnswers(draft, text) {
         pendingQuestions: nextQuestionBatch(remainingQueue),
         answeredCount
     };
+}
+
+async function resolveClarificationAnswersWithAi(chatId, draft, text) {
+    if (!shouldUseAi(draft)) {
+        return null;
+    }
+
+    try {
+        const aiResult = await generateClarificationAnswerResolution({
+            user_answer: String(text || ""),
+            pending_questions: Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [],
+            all_questions: Array.isArray(draft.questionsQueue) ? draft.questionsQueue : [],
+            current_answers: draft.answers || {},
+            extracted_tz: draft.extracted || {}
+        });
+
+        const resolvedAnswers = {
+            ...(draft.answers || {}),
+            ...(aiResult.resolved_answers || {})
+        };
+        const remainingQueue = pruneResolvedQuestions(
+            (Array.isArray(draft.questionsQueue) ? draft.questionsQueue : []).filter(
+                (question) => !Array.isArray(aiResult.skip_keys) || !aiResult.skip_keys.includes(question.key)
+            ),
+            resolvedAnswers
+        );
+
+        return {
+            answers: resolvedAnswers,
+            questionsQueue: remainingQueue,
+            pendingQuestions: nextQuestionBatch(remainingQueue),
+            answeredCount: Object.keys(aiResult.resolved_answers || {}).length,
+            confidence: aiResult.confidence || "",
+            notes: aiResult.notes || ""
+        };
+    } catch (error) {
+        disableAiForChat(chatId, draft, error?.message);
+        return null;
+    }
 }
 
 function tryParseJson(text) {
@@ -1389,7 +1487,8 @@ async function handleCollectingAnswers(message, draft) {
         return { handled: true, command: "clarification_help" };
     }
 
-    const updated = applyAnswers(draft, message.text || "");
+    const updated = await resolveClarificationAnswersWithAi(chatId, draft, message.text || "")
+        || applyAnswers(draft, message.text || "");
     const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.answers);
 
     const nextDraft = {

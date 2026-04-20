@@ -246,6 +246,37 @@ async function generateClarificationBundle(context) {
     };
 }
 
+async function generateClarificationAnswerResolution(input) {
+    const systemPrompt = [
+        "You resolve a user's free-text answer to clarification questions for a Telegram financial table builder.",
+        "Return only JSON.",
+        "Use the provided question keys exactly.",
+        "You may apply one general answer to multiple related questions if the user clearly means all of them.",
+        "If centralized payment through accountant is chosen, related input-method questions can be skipped.",
+        "Do not invent new keys.",
+        "If the user did not answer a question, leave it unresolved.",
+        "skip_keys should contain only questions that became irrelevant because of the resolved answers."
+    ].join(" ");
+
+    const userPrompt = `Context:\n${JSON.stringify(input, null, 2)}\n\nReturn JSON:\n{\n  "resolved_answers": {"question_key":"answer text"},\n  "skip_keys": ["question_key"],\n  "confidence": "high|medium|low",\n  "notes": "short explanation"\n}`;
+
+    const data = await callJsonTask({ systemPrompt, userPrompt });
+    return {
+        resolved_answers: data.resolved_answers && typeof data.resolved_answers === "object" && !Array.isArray(data.resolved_answers)
+            ? Object.fromEntries(
+                Object.entries(data.resolved_answers)
+                    .map(([key, value]) => [String(key || "").trim(), String(value || "").trim()])
+                    .filter(([key, value]) => key && value)
+            )
+            : {},
+        skip_keys: Array.isArray(data.skip_keys)
+            ? data.skip_keys.map((item) => String(item || "").trim()).filter(Boolean)
+            : [],
+        confidence: String(data.confidence || "").trim().toLowerCase(),
+        notes: String(data.notes || "").trim()
+    };
+}
+
 async function generateBusinessNameFromText(input) {
     const systemPrompt = [
         "You generate a short business name from user description.",
@@ -327,6 +358,7 @@ module.exports = {
     isEnabled,
     getConfigSummary,
     generateClarificationBundle,
+    generateClarificationAnswerResolution,
     generateUpdatePayloadFromText,
     generateTzFromFreeText,
     generateBusinessNameFromText,
