@@ -35,6 +35,136 @@ Relevant files:
 5. `apps-script/FinancialReportsBuilder.gs`
    Google Apps Script backend that creates/updates/validates Google Sheets files.
 
+## Where AI Is Used Now
+
+This section describes where AI is currently involved in the system and where it ideally should or should not be involved.
+
+### 1. Input Parsing Stage
+
+#### Structured TZ input
+
+Example:
+
+```text
+business_name: ...
+report_type: cashflow
+inflows:
+outflows:
+```
+
+Current intended behavior:
+
+1. Parsed by `src/telegram/tzParser.js`
+2. Should be deterministic
+3. Should not depend on AI for primary parsing
+
+AI should ideally be used here only as a fallback of last resort, not as the main parser.
+
+#### Free-text input
+
+Example:
+
+```text
+У мене логістичний бізнес, хочу таблицю для руху грошей.
+```
+
+Current behavior:
+
+1. Heuristic parsing may run first.
+2. If heuristics are insufficient, `src/ai/agentBrain.js` is used to generate TZ-like structured data.
+
+AI is expected here and is part of the intended design.
+
+### 2. Clarification Generation Stage
+
+Current behavior:
+
+1. For missing information, the bot can generate clarification questions.
+2. These questions may be produced by AI in `src/ai/agentBrain.js`.
+
+Desired behavior:
+
+1. For structured TZ, clarification generation should remain conservative and close to deterministic logic.
+2. For free-text, AI can be more active in generating grouped questions.
+
+### 3. Clarification Answer Resolution Stage
+
+This is the most problematic area right now.
+
+Current behavior:
+
+1. The bot tries to understand short user replies to clarification questions.
+2. Some of this is handled by deterministic code in `src/telegram/webhookHandler.js`.
+3. Some of this is handled by AI in `src/ai/agentBrain.js`.
+
+This mixed responsibility is one of the reasons the flow became unstable.
+
+Desired behavior:
+
+1. AI should semantically interpret short clarification answers.
+2. Deterministic code should apply the result, update resolved answers, and remove irrelevant dependent questions.
+3. Structured TZ should not be forced through brittle regex-heavy interpretation.
+
+### 4. Edit / Update Requests
+
+Current behavior:
+
+1. If the user wants to modify an existing table in free text, AI may convert that request into an `update_table` payload.
+2. This is handled in `src/ai/agentBrain.js`.
+
+AI is appropriate here because the task is semantic mapping from user intent to structured update actions.
+
+### 5. Custom Architecture Mode
+
+Current behavior:
+
+1. For vague or non-standard requests, the bot can route into a custom architecture / blueprint mode.
+2. AI is used there to generate planning questions or a blueprint.
+
+AI is appropriate here, but this mode must stay fully separated from the structured TZ flow.
+
+## Which AI Providers / Models Are Involved
+
+At the infrastructure level, the AI layer is implemented in `src/ai/agentBrain.js`.
+
+Current provider strategy:
+
+1. Anthropic can be used as the main provider.
+2. OpenRouter can be used as fallback or as the main provider.
+3. The exact model is controlled by environment variables.
+
+So from the architectural point of view, the handoff should assume:
+
+1. There is an LLM abstraction layer already.
+2. The problem is not which vendor is used.
+3. The problem is where AI is inserted into the flow and how its output is trusted/applied.
+
+## Recommended AI Responsibility Split
+
+The cleanest target design is:
+
+### AI should be used for:
+
+1. Free-text to TZ conversion.
+2. Semantic interpretation of short clarification answers.
+3. Generating clarification questions for free-text mode.
+4. Translating edit requests into update payloads.
+5. Custom architecture / blueprint mode.
+
+### AI should not be the primary engine for:
+
+1. Parsing already-structured TZ.
+2. Main routing between structured TZ and free-text.
+3. The deterministic build state machine itself.
+4. Dependency removal logic after answers are resolved.
+
+In other words:
+
+1. AI should interpret meaning.
+2. Deterministic code should control state transitions.
+
+That separation is currently not clean enough, and that is one of the root causes of the instability.
+
 ## Stable Historical Baseline
 
 The flow was previously stable before free-text expansion.
