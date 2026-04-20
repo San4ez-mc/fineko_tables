@@ -241,6 +241,86 @@ function splitAnswers(text) {
         .filter(Boolean);
 }
 
+function looksLikeClarificationRequest(text) {
+    const source = normalizeText(text).toLowerCase();
+    if (!source) return false;
+
+    return /\?|що\s+таке|що\s+значить|що\s+мається\s+на\s+увазі|не\s+зрозуміл|поясни|поясніть|розшифруй/.test(source);
+}
+
+function buildClarificationHelp(text, pendingQuestions = []) {
+    const source = normalizeText(text).toLowerCase();
+
+    if (/підзвіт|заявк/.test(source)) {
+        return [
+            "Коротко поясню:",
+            "",
+            "Підзвіт: людина сама оплачує витрату або їй наперед видають гроші, а потім вона записує цю витрату у таблицю.",
+            "Заявка через бухгалтера: людина сама не платить, а просить бухгалтера провести оплату централізовано.",
+            "",
+            "Для вашого кейсу можеш відповідати дуже коротко:",
+            "1. Через бухгалтера",
+            "або",
+            "1. Підзвіт"
+        ].join("\n");
+    }
+
+    if (/google\s*form|форм/.test(source)) {
+        return [
+            "Коротко поясню:",
+            "",
+            "Google Form: проста онлайн-форма, куди людина вносить дані через посилання.",
+            "Окремий аркуш: окрема вкладка в Google Sheets, де людина вносить дані напряму.",
+            "",
+            "Можеш відповісти коротко: Google Form або окремий аркуш."
+        ].join("\n");
+    }
+
+    return [
+        "Можу уточнити формулювання.",
+        "Відповідай коротко по пунктах на ті питання, які вже надіслав бот.",
+        pendingQuestions.length > 0 ? "Якщо зручніше, дай відповідь хоча б на перший пункт." : ""
+    ].filter(Boolean).join("\n");
+}
+
+function getQuestionGlossary(questions = []) {
+    const source = questions.map((q) => normalizeText(q?.text || "").toLowerCase()).join(" \n ");
+    const notes = [];
+
+    if (/підзвіт/.test(source)) {
+        notes.push("підзвіт = людина платить сама або з виданих їй грошей, а потім записує витрату");
+    }
+    if (/заявк/.test(source)) {
+        notes.push("заявка через бухгалтера = людина не платить сама, а бухгалтер оплачує централізовано");
+    }
+    if (/google\s*form/.test(source)) {
+        notes.push("Google Form = проста онлайн-форма за посиланням для внесення даних");
+    }
+    if (/окремий аркуш/.test(source)) {
+        notes.push("окремий аркуш = окрема вкладка в таблиці Google Sheets");
+    }
+    if (/p&l|\bpl\b/.test(source)) {
+        notes.push("P&L = звіт про прибутки і збитки");
+    }
+    if (/dashboard/.test(source)) {
+        notes.push("dashboard = зведений екран з ключовими показниками");
+    }
+
+    return notes;
+}
+
+function buildQuestionsMessage(title, questions) {
+    const glossary = getQuestionGlossary(questions);
+    return [
+        title,
+        ...questions.map((q, i) => `${i + 1}. ${q.text}`),
+        "",
+        ...glossary.map((item) => `Пояснення: ${item}`),
+        glossary.length > 0 ? "" : "",
+        "Відповідай нумеровано, можна навіть частково: 1. Через бухгалтера"
+    ].filter(Boolean).join("\n");
+}
+
 function asYesNo(value) {
     const text = normalizeText(value).toLowerCase();
     return ["yes", "y", "true", "1", "так", "да"].includes(text);
@@ -271,36 +351,50 @@ function normalizeAnswerValue(value, fallback) {
 
 function applyAnswers(draft, text) {
     const answers = splitAnswers(text);
+        ...getQuestionGlossary(questions).map((item) => `Пояснення: ${item}`),
+        getQuestionGlossary(questions).length > 0 ? "" : "",
     const batch = Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [];
     const resolved = { ...(draft.answers || {}) };
 
-    if (batch.length === 1) {
-        resolved[batch[0].key] = normalizeAnswerValue(text);
+    if (batch.length === 0) {
+        return {
+            answers: resolved,
+            questionsQueue: Array.isArray(draft.questionsQueue) ? draft.questionsQueue : [],
+            pendingQuestions: [],
+            answeredCount: 0
+        };
+    }
+
+        `Надходження: архітектура ${analysis.inflowsMode} (A = одна проста вкладка, B = кілька джерел або людей, C = складний процес з багатьма учасниками)`,
+        `Витрати: архітектура ${analysis.outflowsMode} (A = одна проста вкладка, B = кілька джерел або людей, C = складний процес з багатьма учасниками)`
     } else {
-        batch.forEach((question, index) => {
-            resolved[question.key] = normalizeAnswerValue(answers[index], answers[answers.length - 1] || "");
+        batch.slice(0, answers.length).forEach((question, index) => {
+            resolved[question.key] = normalizeAnswerValue(answers[index]);
         });
     }
 
-    const remainingQueue = Array.isArray(draft.questionsQueue)
+    const answeredCount = batch.length === 1 ? 1 : Math.min(batch.length, answers.length);
+        `Аркуші (вкладки в таблиці): ${inferSheetsFromPayload(payload).join(", ")}`,
         ? draft.questionsQueue.slice(batch.length)
         : [];
+    const remainingQueue = batch.slice(answeredCount).concat(queuedAfterCurrentBatch);
 
     return {
         answers: resolved,
         questionsQueue: remainingQueue,
-        pendingQuestions: nextQuestionBatch(remainingQueue)
+        pendingQuestions: nextQuestionBatch(remainingQueue),
+        answeredCount
     };
 }
 
-function tryParseJson(text) {
+            text: "Вкажи тип таблиці: cashflow (рух грошей), pl / P&L (прибутки і збитки), balance (баланс), dashboard (зведений екран з показниками)"
     const trimmed = normalizeText(text);
     if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
 
     try {
         return JSON.parse(trimmed);
     } catch {
-        return null;
+            text: "Дай мінімум 1-2 статті, тобто які саме гроші заходять і на що витрачаються (формат: Надходження: ..., Витрати: ...)"
     }
 }
 
@@ -310,11 +404,11 @@ function buildArchitectureMessage(analysis) {
         "",
         `Загальна кількість операцій: ${analysis.totalOps}/міс`,
         analysis.noAccessPeople.length > 0
-            ? `Без доступу до Sheets: ${analysis.noAccessPeople.map((i) => `${i.name} (${i.ops})`).join(", ")}`
+            text: `${article} — ${person}: як проходить оплата? Підзвіт = людина платить сама і потім записує витрату. Заявка через бухгалтера = бухгалтер оплачує централізовано.`
             : "Без доступу до Sheets: немає",
         `Надходження: архітектура ${analysis.inflowsMode}`,
         `Витрати: архітектура ${analysis.outflowsMode}`
-    ].join("\n");
+            text: `${article} — якщо це підзвіт, як зручніше вносити дані: Google Form (проста форма за посиланням) чи окремий аркуш (окрема вкладка в таблиці)?`
 }
 
 function hasAtLeastOneArticle(tz) {
@@ -342,8 +436,8 @@ function detectRoutingMode(text, parsedTz) {
     const fromTz = normalizeReportType(parsedTz?.report_type);
     if (fromTz) return { mode: "known", reportType: fromTz };
 
-    const fromText = detectKnownTypeFromText(text);
-    if (fromText) return { mode: "known", reportType: fromText };
+        `Надходження: архітектура ${analysis.inflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`,
+        `Витрати: архітектура ${analysis.outflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`
 
     const asksToBuild = /(зроби|побудуй|створи|потрібна|потрібен|таблиц|table)/i.test(String(text || ""));
     if (asksToBuild) return { mode: "custom", reportType: "" };
@@ -388,14 +482,14 @@ function buildQuestionQueue(tz, _analysis, askedQuestionsCount = 0) {
     if (!normalizeReportType(tz.report_type)) {
         questions.push({
             key: "report_type",
-            text: "Вкажи тип таблиці: cashflow / pl / balance / dashboard"
+            text: "Вкажи тип таблиці: cashflow (рух грошей), pl / P&L (прибутки і збитки), balance (баланс), dashboard (зведений екран з показниками)"
         });
     }
 
     if (!hasAtLeastOneArticle(tz)) {
         questions.push({
             key: "articles_seed",
-            text: "Дай мінімум 1-2 статті (формат: Надходження: ..., Витрати: ...)"
+            text: "Дай мінімум 1-2 статті, тобто які саме гроші заходять і на що витрачаються (формат: Надходження: ..., Витрати: ...)"
         });
     }
 
@@ -405,11 +499,11 @@ function buildQuestionQueue(tz, _analysis, askedQuestionsCount = 0) {
         const article = normalizeText(item.article || item.name || "Стаття");
         questions.push({
             key: `money_flow_${index}`,
-            text: `${article} — ${person}: сам платить (підзвіт) чи заявка через бухгалтера?`
+            text: `${article} — ${person}: як проходить оплата? Підзвіт = людина платить сама і потім записує витрату. Заявка через бухгалтера = бухгалтер оплачує централізовано.`
         });
         questions.push({
             key: `no_access_method_${index}`,
-            text: `${article} — якщо підзвіт, що зручніше: Google Form чи окремий аркуш?`
+            text: `${article} — якщо це підзвіт, як зручніше вносити дані: Google Form (проста форма за посиланням) чи окремий аркуш (окрема вкладка в таблиці)?`
         });
     });
 
@@ -517,7 +611,7 @@ function buildConfirmationMessage(payload) {
     return [
         "Готовий будувати.",
         `Файл: ${payload.report_type}_${payload.business_name}_${new Date().getFullYear()}`,
-        `Аркуші: ${inferSheetsFromPayload(payload).join(", ")}`,
+        `Аркуші (вкладки в таблиці): ${inferSheetsFromPayload(payload).join(", ")}`,
         `Надходження: ${(payload.articles?.inflows || []).join(", ") || "-"}`,
         `Витрати: ${(payload.articles?.outflows || []).join(", ") || "-"}`,
         "Будуємо? (так/ні/змінити)"
@@ -888,10 +982,10 @@ async function startCustomArchitectureMode(message, draft) {
     const rawText = normalizeText(message.text || "");
 
     const customDefaultQuestions = [
-        { key: "custom_goal", text: "Яка головна мета таблиці і яке рішення має прийматись на її основі?" },
-        { key: "custom_tabs", text: "Які аркуші/блоки потрібні (3-7 пунктів) і що на кожному зберігається?" },
-        { key: "custom_fields", text: "Які ключові поля та формули обов'язкові?" },
-        { key: "custom_users", text: "Хто буде вносити дані і хто тільки переглядатиме?" }
+        { key: "custom_goal", text: "Яка головна мета таблиці і яке рішення має прийматись на її основі простими словами?" },
+        { key: "custom_tabs", text: "Які аркуші або блоки потрібні, тобто які окремі вкладки чи розділи мають бути, і що на кожному зберігається?" },
+        { key: "custom_fields", text: "Які ключові поля та формули обов'язкові? Поля = що людина заповнює, формули = що таблиця рахує автоматично." },
+        { key: "custom_users", text: "Хто буде вносити дані, а хто тільки переглядатиме без редагування?" }
     ];
 
     let messageText = "Вмикаю режим архітектора для кастомної таблиці. Зберу план і далі побудуємо структуру.";
@@ -1080,7 +1174,7 @@ async function handleTzCapture(message, draft) {
         await sendMessage(chatId, [
             "Не вистачає кількох деталей:",
             "",
-            "1. Не визначений тип таблиці — це Cashflow, P&L чи щось інше?",
+            "1. Не визначений тип таблиці — це Cashflow (рух грошей), P&L (прибутки і збитки) чи щось інше?",
             "2. Опиши коротко які операції треба відстежувати.",
             "",
             "Відповідай нумеровано або просто допиши опис."
@@ -1140,12 +1234,7 @@ async function handleTzCapture(message, draft) {
 
     await sendMessage(chatId, aiBundle.message || buildArchitectureMessage(analysis));
     if (pendingQuestions.length > 0) {
-        await sendMessage(chatId, [
-            "Є кілька уточнень перед тим як починати:",
-            ...pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`),
-            "",
-            "Відповідай нумеровано, наприклад: 1. Через бухгалтера / 2. Щотижня / 3. Ні"
-        ].join("\n"));
+        await sendMessage(chatId, buildQuestionsMessage("Є кілька уточнень перед тим як починати:", pendingQuestions));
     }
 
     return { handled: true, command: "tz_clarification_started" };
@@ -1153,6 +1242,16 @@ async function handleTzCapture(message, draft) {
 
 async function handleCollectingAnswers(message, draft) {
     const chatId = message.chat.id;
+    const text = normalizeText(message.text || "");
+
+    if (looksLikeClarificationRequest(text)) {
+        await sendMessage(chatId, buildClarificationHelp(text, draft.pendingQuestions || []));
+        if ((draft.pendingQuestions || []).length > 0) {
+            await sendMessage(chatId, buildQuestionsMessage("Повертаємось до уточнень:", draft.pendingQuestions || []));
+        }
+        return { handled: true, command: "clarification_help" };
+    }
+
     const updated = applyAnswers(draft, message.text || "");
     const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.answers);
 
@@ -1162,16 +1261,13 @@ async function handleCollectingAnswers(message, draft) {
         stage: updated.pendingQuestions.length > 0 ? STAGES.COLLECTING : STAGES.CONFIRMING,
         extracted: extractedAfterAnswers,
         report_type: normalizeReportType(extractedAfterAnswers.report_type) || draft.report_type,
-        askedQuestionsCount: Number(draft.askedQuestionsCount || 0) + updated.pendingQuestions.length,
+        askedQuestionsCount: Number(draft.askedQuestionsCount || 0),
         clarifications: [...(draft.clarifications || []), normalizeText(message.text)]
     };
 
     if (updated.pendingQuestions.length > 0) {
         setDraft(chatId, nextDraft);
-        await sendMessage(chatId, [
-            "Кілька уточнень:",
-            ...updated.pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`)
-        ].join("\n"));
+        await sendMessage(chatId, buildQuestionsMessage("Кілька уточнень:", updated.pendingQuestions));
         return { handled: true, command: "clarify_answers" };
     }
 

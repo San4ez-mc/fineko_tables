@@ -221,6 +221,8 @@ async function generateClarificationBundle(context) {
         "You are a finance table assistant for Telegram.",
         "Return only JSON.",
         "Use concise Ukrainian text without markdown.",
+        "Use simple user-facing language.",
+        "If you must use a specific finance or spreadsheet term, immediately explain it in plain words in the same sentence.",
         "Ask only critical missing questions for table build.",
         "Group related topics into one question.",
         "Each message must include at most 3-4 grouped questions.",
