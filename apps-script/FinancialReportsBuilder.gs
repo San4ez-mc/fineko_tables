@@ -72,6 +72,19 @@ function applySheetBanding_(sheet, theme, keepRows, keepCols) {
   }
 }
 
+function applyArticleDropdown_(sheet, column, namedRangeName) {
+  var ss = sheet.getParent();
+  var namedRange = ss.getRangeByName(namedRangeName);
+  if (!namedRange) return;
+
+  var validation = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(namedRange, true)
+    .setAllowInvalid(true)
+    .build();
+
+  sheet.getRange(2, column, 1000, 1).setDataValidation(validation);
+}
+
 function addTestData(sheet, articles, isInflow) {
   var list = Array.isArray(articles) ? articles.filter(Boolean) : [];
   if (!list.length) return;
@@ -800,11 +813,7 @@ function setupInputSheet_(sheet, namedRangeName) {
   sheet.getRange('A:A').setNumberFormat('dd.mm.yyyy');
   sheet.getRange('D:D').setNumberFormat('# ##0.00');
 
-  var validation = SpreadsheetApp.newDataValidation()
-    .requireFormulaSatisfied('=COUNTIF(' + namedRangeName + ',INDIRECT("RC",FALSE))>=0')
-    .setAllowInvalid(true)
-    .build();
-  sheet.getRange(2, 3, 1000, 1).setDataValidation(validation);
+  applyArticleDropdown_(sheet, 3, namedRangeName);
 
   protectHeader_(sheet);
 }
@@ -819,6 +828,7 @@ function setupPersonalExpenseSheet_(sheet) {
   sheet.getRange('G1').setFormula('=SUM(D2:D)');
   sheet.getRange('F2').setValue('Залишок авансу');
   sheet.getRange('G2').setFormula('=\'' + SETTINGS_SHEET_NAME + '\'!B6-SUM(D2:D)');
+  applyArticleDropdown_(sheet, 3, 'articles_outflows');
   protectHeader_(sheet);
 }
 
