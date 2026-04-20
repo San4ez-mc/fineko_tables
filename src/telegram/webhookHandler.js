@@ -674,8 +674,15 @@ function buildPayloadFromTzDraft(draft, message) {
 
 function inferSheetsFromPayload(payload) {
     const sheets = [];
-    if (payload.report_type === "cashflow") sheets.push("Cashflow", "Надходження", "Витрати");
-    sheets.push("Довідники", "Налаштування", "References");
+    if (payload.report_type === "cashflow") {
+        sheets.push("Cashflow", "Надходження", "Витрати", "Довідники", "Налаштування", "References");
+    } else if (payload.report_type === "pl") {
+        sheets.push("P&L", "Доходи", "Прямі витрати", "Операційні витрати", "Довідники", "Налаштування", "References");
+    } else if (payload.report_type === "balance") {
+        sheets.push("Баланс", "Довідники", "Налаштування", "References");
+    } else {
+        sheets.push("Dashboard", "References");
+    }
     if (payload.options?.payment_calendar) sheets.push("Платіжний календар");
 
     const byPerson = new Set();

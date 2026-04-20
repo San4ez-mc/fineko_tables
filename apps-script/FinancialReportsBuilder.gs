@@ -769,17 +769,62 @@ function buildCashflow_(ctx) {
 
 function buildPl_(ctx) {
   var ss = ctx.spreadsheet;
-  renameDefaultSheet_(ss, '📊 P&L');
-  ensureSheet_(ss, '💰 Доходи');
-  ensureSheet_(ss, '💸 Прямі витрати');
-  ensureSheet_(ss, '💸 Операційні витрати');
-  ensureSheet_(ss, '📋 Довідники');
-  ensureSheet_(ss, '⚙️ Налаштування');
-  ensureSheet_(ss, '🔗 References');
+  var payload = ctx.payload;
+  var articles = payload.articles || {};
+  var responsible = payload.responsible || {};
+  var options = payload.options || {};
 
-  ctx.sheetsBuilt = ['📊 P&L', '💰 Доходи', '💸 Прямі витрати', '💸 Операційні витрати', '📋 Довідники', '⚙️ Налаштування', '🔗 References'];
+  renameDefaultSheet_(ss, '📊 P&L');
+  ctx.sheetsBuilt = ['📊 P&L'];
+
+  var incomeSheet = ensureSheet_(ss, '💰 Доходи');
+  setupInputSheet_(incomeSheet, 'articles_inflows');
+  addTestData(incomeSheet, articles.inflows || [], true);
+  ctx.sheetsBuilt.push('💰 Доходи');
+
+  var directExpenseSheet = ensureSheet_(ss, '💸 Прямі витрати');
+  setupInputSheet_(directExpenseSheet, 'articles_outflows');
+  ctx.sheetsBuilt.push('💸 Прямі витрати');
+
+  var operatingExpenseSheet = ensureSheet_(ss, '💸 Операційні витрати');
+  setupInputSheet_(operatingExpenseSheet, 'articles_outflows');
+  addTestData(operatingExpenseSheet, articles.outflows || [], false);
+  ctx.sheetsBuilt.push('💸 Операційні витрати');
+
+  var directories = ensureSheet_(ss, '📋 Довідники');
+  setupDirectories_(ss, directories, articles, responsible, options);
+  ctx.sheetsBuilt.push('📋 Довідники');
+
+  var settings = ensureSheet_(ss, '⚙️ Налаштування');
+  setupSettingsSheet_(settings, payload.business_name);
+  ctx.sheetsBuilt.push('⚙️ Налаштування');
+
+  var refs = ensureSheet_(ss, '🔗 References');
+  setupReferencesSheet_(refs, ss.getUrl());
+  ctx.sheetsBuilt.push('🔗 References');
+
   var pl = ss.getSheetByName('📊 P&L');
-  if (pl) pl.setFrozenColumns(1);
+  if (pl) {
+    setupPlSummary_(pl);
+    protectSheet_(pl, 'Зведений аркуш P&L');
+    pl.setFrozenColumns(1);
+  }
+
+  ['💰 Доходи', '💸 Прямі витрати', '💸 Операційні витрати'].forEach(function(name) {
+    var sh = ss.getSheetByName(name);
+    if (sh) {
+      autoResizeAllColumns(sh);
+      trimSheet(sh, 200, Math.max(sh.getLastColumn() + 1, 6));
+    }
+  });
+
+  ['📊 P&L', '📋 Довідники', '⚙️ Налаштування', '🔗 References'].forEach(function(name) {
+    var sh = ss.getSheetByName(name);
+    if (sh) {
+      autoResizeAllColumns(sh);
+      trimSheet(sh, Math.max(sh.getLastRow() + 5, 20), Math.max(sh.getLastColumn() + 1, 6));
+    }
+  });
 }
 
 function buildBalance_(ctx) {
@@ -804,6 +849,27 @@ function buildDashboard_(ctx) {
   dashboard.getRange('B3').setFormula('=IFERROR(IMPORTRANGE(\'🔗 References\'!B1, "Cashflow!A1:D100"), "Надай доступ IMPORTRANGE")');
 
   ctx.sheetsBuilt = ['📊 Dashboard', '🔗 References'];
+}
+
+function setupPlSummary_(sheet) {
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 2).setValues([['Показник', 'Сума']]);
+  sheet.getRange(2, 1, 5, 1).setValues([
+    ['Дохід'],
+    ['Прямі витрати'],
+    ['Валовий прибуток'],
+    ['Операційні витрати'],
+    ['Чистий прибуток']
+  ]);
+
+  sheet.getRange('B2').setFormula("=SUM('💰 Доходи'!D:D)");
+  sheet.getRange('B3').setFormula("=SUM('💸 Прямі витрати'!D:D)");
+  sheet.getRange('B4').setFormula('=B2-B3');
+  sheet.getRange('B5').setFormula("=SUM('💸 Операційні витрати'!D:D)");
+  sheet.getRange('B6').setFormula('=B4-B5');
+
+  sheet.getRange('B2:B6').setNumberFormat('# ##0.00');
+  sheet.setFrozenRows(1);
 }
 
 function setupInputSheet_(sheet, namedRangeName) {
