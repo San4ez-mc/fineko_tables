@@ -167,6 +167,36 @@ function normalizeText(value) {
     return String(value || "").trim();
 }
 
+function joinMessageBlocks(blocks = []) {
+    return blocks
+        .flat()
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+        .join("\n\n");
+}
+
+function sectionTitle(emoji, text) {
+    return `${emoji} ${normalizeText(text)}`;
+}
+
+function bulletLines(items = [], marker = "•") {
+    return items
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+        .map((item) => `${marker} ${item}`);
+}
+
+function numberedLines(items = []) {
+    return items
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+        .map((item, index) => `${index + 1}. ${item}`);
+}
+
+function labelValue(label, value) {
+    return `${label}: ${normalizeText(value) || "-"}`;
+}
+
 function looksLikeCashflowRequest(text) {
     return /(кешфлоу|кеш\s*флоу|кефлоу|cashflow|cash\s*flow)/i.test(String(text || ""));
 }
@@ -252,35 +282,37 @@ function buildClarificationHelp(text, pendingQuestions = []) {
     const source = normalizeText(text).toLowerCase();
 
     if (/підзвіт|заявк/.test(source)) {
-        return [
-            "Коротко поясню:",
-            "",
-            "Підзвіт: людина сама оплачує витрату або їй наперед видають гроші, а потім вона записує цю витрату у таблицю.",
-            "Заявка через бухгалтера: людина сама не платить, а просить бухгалтера провести оплату централізовано.",
-            "",
-            "Для вашого кейсу можеш відповідати дуже коротко:",
-            "1. Через бухгалтера",
-            "або",
-            "1. Підзвіт"
-        ].join("\n");
+        return joinMessageBlocks([
+            sectionTitle("💡", "Коротке пояснення"),
+            bulletLines([
+                "Підзвіт: людина сама оплачує витрату або їй наперед видають гроші, а потім вона записує цю витрату у таблицю.",
+                "Заявка через бухгалтера: людина сама не платить, а просить бухгалтера провести оплату централізовано."
+            ]),
+            [
+                "Можеш відповісти дуже коротко:",
+                ...numberedLines(["Через бухгалтера"]),
+                "або",
+                ...numberedLines(["Підзвіт"])
+            ]
+        ]);
     }
 
     if (/google\s*form|форм/.test(source)) {
-        return [
-            "Коротко поясню:",
-            "",
-            "Google Form: проста онлайн-форма, куди людина вносить дані через посилання.",
-            "Окремий аркуш: окрема вкладка в Google Sheets, де людина вносить дані напряму.",
-            "",
+        return joinMessageBlocks([
+            sectionTitle("💡", "Коротке пояснення"),
+            bulletLines([
+                "Google Form: проста онлайн-форма, куди людина вносить дані через посилання.",
+                "Окремий аркуш: окрема вкладка в Google Sheets, де людина вносить дані напряму."
+            ]),
             "Можеш відповісти коротко: Google Form або окремий аркуш."
-        ].join("\n");
+        ]);
     }
 
-    return [
-        "Можу уточнити формулювання.",
+    return joinMessageBlocks([
+        sectionTitle("💬", "Можу переформулювати питання"),
         "Відповідай коротко по пунктах на ті питання, які вже надіслав бот.",
         pendingQuestions.length > 0 ? "Якщо зручніше, дай відповідь хоча б на перший пункт." : ""
-    ].filter(Boolean).join("\n");
+    ]);
 }
 
 function getQuestionGlossary(questions = []) {
@@ -311,14 +343,14 @@ function getQuestionGlossary(questions = []) {
 
 function buildQuestionsMessage(title, questions) {
     const glossary = getQuestionGlossary(questions);
-    return [
-        title,
-        ...questions.map((q, i) => `${i + 1}. ${q.text}`),
-        "",
-        ...glossary.map((item) => `Пояснення: ${item}`),
-        glossary.length > 0 ? "" : "",
-        "Відповідай нумеровано, можна навіть частково: 1. Через бухгалтера"
-    ].filter(Boolean).join("\n");
+    return joinMessageBlocks([
+        sectionTitle("❓", title),
+        numberedLines(questions.map((q) => q.text)),
+        glossary.length > 0
+            ? [sectionTitle("🧩", "Пояснення термінів"), ...bulletLines(glossary)]
+            : [],
+        "Відповідай нумеровано. Можна навіть частково: 1. Через бухгалтера"
+    ]);
 }
 
 function asYesNo(value) {
@@ -435,16 +467,25 @@ function tryParseJson(text) {
 }
 
 function buildArchitectureMessage(analysis) {
-    return [
-        "📋 Проаналізував ТЗ.",
-        "",
-        `Загальна кількість операцій: ${analysis.totalOps}/міс`,
-        analysis.noAccessPeople.length > 0
-            ? `Без доступу до Sheets: ${analysis.noAccessPeople.map((i) => `${i.name} (${i.ops})`).join(", ")}`
-            : "Без доступу до Sheets: немає",
-        `Надходження: архітектура ${analysis.inflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`,
-        `Витрати: архітектура ${analysis.outflowsMode} (A = одна проста вкладка, B = кілька людей або джерел, C = складний процес з кількома учасниками)`
-    ].join("\n");
+    return joinMessageBlocks([
+        sectionTitle("📋", "Проаналізував запит"),
+        [
+            labelValue("Загальна кількість операцій", `${analysis.totalOps}/міс`),
+            analysis.noAccessPeople.length > 0
+                ? labelValue("Без доступу до Sheets", analysis.noAccessPeople.map((i) => `${i.name} (${i.ops})`).join(", "))
+                : labelValue("Без доступу до Sheets", "немає")
+        ],
+        [
+            sectionTitle("🏗️", "Попередня архітектура"),
+            ...bulletLines([
+                `Надходження: архітектура ${analysis.inflowsMode}`,
+                `Витрати: архітектура ${analysis.outflowsMode}`,
+                "A = одна проста вкладка",
+                "B = кілька людей або джерел",
+                "C = складний процес з кількома учасниками"
+            ])
+        ]
+    ]);
 }
 
 function hasAtLeastOneArticle(tz) {
@@ -644,14 +685,16 @@ function inferSheetsFromPayload(payload) {
 }
 
 function buildConfirmationMessage(payload) {
-    return [
-        "Готовий будувати.",
-        `Файл: ${payload.report_type}_${payload.business_name}_${new Date().getFullYear()}`,
-        `Аркуші (вкладки в таблиці): ${inferSheetsFromPayload(payload).join(", ")}`,
-        `Надходження: ${(payload.articles?.inflows || []).join(", ") || "-"}`,
-        `Витрати: ${(payload.articles?.outflows || []).join(", ") || "-"}`,
-        "Будуємо? (так/ні/змінити)"
-    ].join("\n");
+    return joinMessageBlocks([
+        sectionTitle("✅", "Усе готово до побудови"),
+        [
+            labelValue("Файл", `${payload.report_type}_${payload.business_name}_${new Date().getFullYear()}`),
+            labelValue("Аркуші", inferSheetsFromPayload(payload).join(", ")),
+            labelValue("Надходження", (payload.articles?.inflows || []).join(", ") || "-"),
+            labelValue("Витрати", (payload.articles?.outflows || []).join(", ") || "-")
+        ],
+        "Будуємо далі? Відповідь: так / ні / змінити"
+    ]);
 }
 
 function buildTableEntry(file, payload) {
@@ -697,11 +740,14 @@ function formatTablesList(tablesInfo, draft) {
     const tables = tablesInfo.tables || [];
     if (tables.length === 0) {
         const folderLine = tablesInfo.clientFolder ? `Папка: ${tablesInfo.clientFolder}` : "";
-        return ["У папці клієнта поки немає таблиць.", folderLine].filter(Boolean).join("\n");
+        return joinMessageBlocks([
+            sectionTitle("📁", "У папці клієнта поки немає таблиць"),
+            folderLine
+        ]);
     }
 
     const activeId = draft.activeTableId || draft.spreadsheet_id || null;
-    const lines = ["📁 Твої таблиці:"];
+    const lines = [sectionTitle("📁", "Твої таблиці")];
     if (tablesInfo.clientFolder) lines.push(`Папка клієнта: ${tablesInfo.clientFolder}`);
     if (tablesInfo.folderUrl) lines.push(`Folder URL: ${tablesInfo.folderUrl}`);
     lines.push("");
@@ -713,7 +759,7 @@ function formatTablesList(tablesInfo, draft) {
         if (item.url) lines.push(`   url: ${item.url}`);
     });
 
-    lines.push("Щоб перемкнутись — /use <номер або spreadsheet_id>");
+    lines.push("Щоб перемкнутись, напиши: /use <номер або spreadsheet_id>");
     return lines.join("\n");
 }
 
@@ -737,19 +783,20 @@ function formatAppsScriptResult(result, payload, draft) {
     const files = Array.isArray(result.files) ? result.files : [];
     const forms = Array.isArray(result.forms) ? result.forms : [];
     const firstFile = files[0] || {};
-    const lines = ["✅ Таблиця готова!", ""];
+    const lines = [sectionTitle("✅", "Таблиця готова"), ""];
 
     if (firstFile.name) lines.push(`📊 ${firstFile.name}`);
     if (firstFile.url) lines.push(`🔗 ${firstFile.url}`);
     if (result.folder_url) lines.push(`📁 Папка: ${result.folder_url}`);
 
     if (Array.isArray(result.sheets_built) && result.sheets_built.length > 0) {
-        lines.push("", "Що всередині:");
+        lines.push("", sectionTitle("🧾", "Що всередині"));
         result.sheets_built.forEach((name) => lines.push(`- ${name}`));
     }
 
     if (forms.length > 0) {
         lines.push("");
+        lines.push(sectionTitle("📝", "Форми"));
         forms.forEach((form) => lines.push(`- Форма для ${form.name}: ${form.url}`));
     }
 
@@ -759,17 +806,17 @@ function formatAppsScriptResult(result, payload, draft) {
         lines.push(`Active ID: ${active.spreadsheet_id}`);
     }
 
-    lines.push("", "Перші кроки:");
+    lines.push("", sectionTitle("🚀", "Перші кроки"));
     lines.push("1. Відкрий таблицю і перевір аркуш «Інструкція»");
     lines.push("2. Видали жовті тестові рядки перед реальним використанням");
     if (payload.options?.counterparty_tracking) lines.push("3. Перевір дропдаун контрагентів");
-    lines.push("", "Якщо треба щось змінити — просто напиши.");
+    lines.push("", "Якщо треба щось змінити, просто напиши.");
 
     return lines.join("\n");
 }
 
 function formatLegacyResult(result, draft) {
-    const lines = ["Побудовано через legacy fallback.", ""];
+    const lines = [sectionTitle("🛟", "Таблицю побудовано через резервний режим"), ""];
     if (result.folder_url) lines.push(`Папка: ${result.folder_url}`);
     if (Array.isArray(result.generated_files)) {
         result.generated_files.forEach((f) => lines.push(`${f.title}: ${f.spreadsheet_url}`));
@@ -781,17 +828,19 @@ function formatLegacyResult(result, draft) {
         lines.push(`Active ID: ${active.spreadsheet_id}`);
     }
 
-    lines.push("", "Налаштуй APPS_SCRIPT_URL, щоб основним був Apps Script.");
+    lines.push("", "Щоб основним механізмом був Apps Script, налаштуй APPS_SCRIPT_URL.");
     return lines.join("\n");
 }
 
 function formatBuildError(error) {
-    return [
-        "Не вдалось побудувати таблицю.",
-        `Причина: ${normalizeText(error?.message || "unknown")}`,
-        "Спробуй /retry — повторю спробу з тими самими даними.",
-        "Або напиши що змінити і я перебудую."
-    ].join("\n");
+    return joinMessageBlocks([
+        sectionTitle("❌", "Не вдалося побудувати таблицю"),
+        labelValue("Причина", normalizeText(error?.message || "unknown")),
+        bulletLines([
+            "Спробуй /retry, і я повторю спробу з тими самими даними.",
+            "Або напиши, що змінити, і я перебудую таблицю."
+        ])
+    ]);
 }
 
 function hasBrokenFormulaError(validation) {
@@ -800,21 +849,25 @@ function hasBrokenFormulaError(validation) {
 }
 
 function buildWelcomeMessage() {
-    return [
-        "👋 Привіт! Я допомагаю будувати фінансові таблиці для бізнесу.",
-        "Надішли мені опис того, що потрібно — текстом або у форматі tz-блоку.",
-        "Я проаналізую запит, задам кілька уточнень за потреби і побудую таблицю на твоєму Google Drive.",
-        "",
-        "Команди:",
-        "• /status — поточний стан роботи",
-        "• /tables — список твоїх таблиць",
-        "• /use — вибрати активну таблицю для правок",
-        "• /new — почати створення нової таблиці",
-        "• /retry — повторити останню побудову",
-        "• /clear — очистити поточний діалог",
-        "",
-        "Щоб почати — просто опиши свій бізнес і що треба відстежувати."
-    ].join("\n\n");
+    return joinMessageBlocks([
+        sectionTitle("👋", "Привіт! Я допомагаю будувати фінансові таблиці для бізнесу."),
+        [
+            "Надішли мені опис того, що потрібно, текстом або у форматі tz-блоку.",
+            "Я проаналізую запит, задам кілька уточнень за потреби і побудую таблицю на твоєму Google Drive."
+        ],
+        [
+            sectionTitle("🧭", "Команди"),
+            ...bulletLines([
+                "/status — поточний стан роботи",
+                "/tables — список твоїх таблиць",
+                "/use — вибрати активну таблицю для правок",
+                "/new — почати створення нової таблиці",
+                "/retry — повторити останню побудову",
+                "/clear — очистити поточний діалог"
+            ])
+        ],
+        "Щоб почати, просто опиши свій бізнес і що треба відстежувати."
+    ]);
 }
 
 function getBrandPhotoUrl() {
@@ -827,20 +880,26 @@ function buildStatusMessage(draft) {
     const llm = getConfigSummary();
     const active = resolveActiveTable(draft);
 
-    return [
-        `stage: ${draft.stage}`,
-        `report_type: ${draft.report_type || "unknown"}`,
-        `questions_left: ${Array.isArray(draft.questionsQueue) ? draft.questionsQueue.length : 0}`,
-        `questions_asked: ${Number(draft.askedQuestionsCount || 0)} / ${MAX_TOTAL_QUESTIONS}`,
-        `has_payload: ${draft.payload ? "yes" : "no"}`,
-        `active_table_id: ${active?.spreadsheet_id || "-"}`,
-        `active_table_name: ${draft.activeTableName || "-"}`,
-        `legacy_fallback_used: ${draft.legacyFallbackUsed ? "yes" : "no"}`,
-        `ai_enabled: ${llm.enabled ? "yes" : "no"}`,
-        `ai_temporarily_disabled: ${draft.aiTemporarilyDisabled ? "yes" : "no"}`,
-        `ai_provider: ${llm.provider}`,
-        `ai_model: ${llm.model}`
-    ].join("\n");
+    return joinMessageBlocks([
+        sectionTitle("📍", "Поточний стан"),
+        [
+            labelValue("Етап", draft.stage),
+            labelValue("Тип звіту", draft.report_type || "unknown"),
+            labelValue("Питань залишилось", Array.isArray(draft.questionsQueue) ? draft.questionsQueue.length : 0),
+            labelValue("Питань вже поставлено", `${Number(draft.askedQuestionsCount || 0)} / ${MAX_TOTAL_QUESTIONS}`),
+            labelValue("Payload готовий", draft.payload ? "так" : "ні"),
+            labelValue("Активна таблиця ID", active?.spreadsheet_id || "-"),
+            labelValue("Активна таблиця", draft.activeTableName || "-")
+        ],
+        [
+            sectionTitle("🤖", "AI"),
+            labelValue("Fallback використано", draft.legacyFallbackUsed ? "так" : "ні"),
+            labelValue("AI увімкнено", llm.enabled ? "так" : "ні"),
+            labelValue("AI тимчасово вимкнено", draft.aiTemporarilyDisabled ? "так" : "ні"),
+            labelValue("Провайдер", llm.provider),
+            labelValue("Модель", llm.model)
+        ]
+    ]);
 }
 
 async function executeBuild(payload) {
@@ -856,8 +915,14 @@ async function executeBuild(payload) {
 async function runBuildAndReply(message, draft, payload, commandLabel) {
     const chatId = message.chat.id;
     setDraft(chatId, { ...draft, stage: STAGES.BUILDING, lastPayload: payload });
-    await sendMessage(chatId, "⚙️ Будую таблицю, це займе ~30 секунд...");
-    await sendMessage(chatId, "Планую структуру таблиці і готую аркуші...");
+    await sendMessage(chatId, joinMessageBlocks([
+        sectionTitle("⚙️", "Будую таблицю"),
+        "Це займе приблизно 30 секунд."
+    ]));
+    await sendMessage(chatId, joinMessageBlocks([
+        sectionTitle("🧱", "Готую структуру"),
+        "Планую аркуші, зв'язки та базові налаштування."
+    ]));
 
     try {
         const build = await executeBuild(payload);
@@ -880,7 +945,10 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
             };
             setDraft(chatId, updatedDraft);
 
-            await sendMessage(chatId, "Перевіряю формули і цілісність файлу...");
+            await sendMessage(chatId, joinMessageBlocks([
+                sectionTitle("🔍", "Перевіряю файл"),
+                "Дивлюсь формули і цілісність таблиці."
+            ]));
 
             let validationResult = null;
             if (activeId) {
@@ -907,7 +975,10 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
 
             if (validationResult && validationResult.valid === false) {
                 if (activeId && hasBrokenFormulaError(validationResult)) {
-                    await sendMessage(chatId, "Знайшов технічний збій у формулах, виправляю автоматично...");
+                    await sendMessage(chatId, joinMessageBlocks([
+                        sectionTitle("🩺", "Знайшов технічний збій у формулах"),
+                        "Пробую виправити автоматично."
+                    ]));
                     try {
                         await updateTableViaAppsScript({
                             action: "update_table",
@@ -920,36 +991,32 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
                     }
 
                     if (validationResult && validationResult.valid) {
-                        await sendMessage(chatId, "Формули виправлено. Завершую налаштування...");
+                        await sendMessage(chatId, joinMessageBlocks([
+                            sectionTitle("✅", "Формули виправлено"),
+                            "Завершую налаштування."
+                        ]));
                     }
                 }
 
                 if (validationResult && validationResult.valid === false) {
-                    await sendMessage(chatId, "Є технічна проблема під час фінальної перевірки. Я вже зберіг таблицю, але потрібно повторити /retry для автоматичної доводки.");
+                    await sendMessage(chatId, joinMessageBlocks([
+                        sectionTitle("⚠️", "Є проблема під час фінальної перевірки"),
+                        "Таблицю я вже зберіг, але для автоматичної доводки потрібно запустити /retry."
+                    ]));
                     return { handled: true, command: commandLabel, engine: "apps_script", result: build.result, validation: validationResult };
                 }
             }
 
-            const firstFile = build.result.files?.[0] || {};
-            let msg = "✅ Таблиця готова!\n\n";
-            if (firstFile.name) msg += `${firstFile.name}\n`;
-            if (firstFile.url) msg += `${firstFile.url}\n`;
-
-            if (Array.isArray(build.result.forms) && build.result.forms.length > 0) {
-                build.result.forms.forEach((form) => {
-                    msg += `\nФорма для ${form.name}:\n${form.url}`;
-                });
-            }
-
-            if (validationResult?.warnings?.length) {
-                msg += "\n\nПопередження:";
-                validationResult.warnings.forEach((item) => {
-                    msg += `\n⚠️ ${item}`;
-                });
-            }
-
-            msg += "\n\nЯкщо треба щось змінити — просто напиши.";
-            msg += "\nЩоб створити нову таблицю, натисни кнопку нижче або напиши /new.";
+            const msg = [
+                formatAppsScriptResult(build.result, payload, updatedDraft),
+                validationResult?.warnings?.length
+                    ? joinMessageBlocks([
+                        sectionTitle("⚠️", "Попередження"),
+                        bulletLines(validationResult.warnings)
+                    ])
+                    : "",
+                "Щоб створити нову таблицю, натисни кнопку нижче або напиши /new."
+            ].filter(Boolean).join("\n\n");
             await sendMessage(chatId, msg, withNewTableButton());
             return { handled: true, command: commandLabel, engine: "apps_script", result: build.result };
         }
@@ -977,11 +1044,11 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
         };
         setDraft(chatId, updatedDraft);
 
-        await sendMessage(chatId, "✅ Таблиця готова через резервний режим.\n\n" + formatLegacyResult(build.result, updatedDraft));
+        await sendMessage(chatId, formatLegacyResult(build.result, updatedDraft));
         return { handled: true, command: commandLabel, engine: "legacy", result: build.result };
     } catch (error) {
         setDraft(chatId, { ...getDraft(chatId), stage: STAGES.CONFIRMING, lastPayload: payload });
-        await sendMessage(chatId, "❌ " + formatBuildError(error));
+        await sendMessage(chatId, formatBuildError(error));
         return { handled: true, command: commandLabel, error: error.message };
     }
 }
@@ -1024,7 +1091,10 @@ async function startCustomArchitectureMode(message, draft) {
         { key: "custom_users", text: "Хто буде вносити дані, а хто тільки переглядатиме без редагування?" }
     ];
 
-    let messageText = "Вмикаю режим архітектора для кастомної таблиці. Зберу план і далі побудуємо структуру.";
+    let messageText = joinMessageBlocks([
+        sectionTitle("🧠", "Вмикаю режим архітектора для кастомної таблиці"),
+        "Зберу план і далі побудуємо структуру."
+    ]);
     let questions = customDefaultQuestions;
 
     if (shouldUseAi(draft)) {
@@ -1056,13 +1126,11 @@ async function startCustomArchitectureMode(message, draft) {
     });
 
     await sendMessage(chatId, messageText);
-    await sendMessage(chatId, [
-        "Кілька питань про команду:",
-        "",
-        ...pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`),
-        "",
+    await sendMessage(chatId, joinMessageBlocks([
+        sectionTitle("❓", "Кілька питань для проєктування"),
+        numberedLines(pendingQuestions.map((q) => q.text)),
         "Відповідай нумеровано, наприклад: 1. Через бухгалтера / 2. Щотижня / 3. Ні"
-    ].join("\n"));
+    ]));
 
     return { handled: true, command: "custom_architect_started" };
 }
@@ -1207,14 +1275,14 @@ async function handleTzCapture(message, draft) {
     }
 
     if (!tz && routing.mode !== "known") {
-        await sendMessage(chatId, [
-            "Не вистачає кількох деталей:",
-            "",
-            "1. Не визначений тип таблиці — це Cashflow (рух грошей), P&L (прибутки і збитки) чи щось інше?",
-            "2. Опиши коротко які операції треба відстежувати.",
-            "",
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("🧩", "Не вистачає кількох деталей"),
+            numberedLines([
+                "Не визначений тип таблиці: це Cashflow (рух грошей), P&L (прибутки і збитки) чи щось інше?",
+                "Опиши коротко, які операції треба відстежувати."
+            ]),
             "Відповідай нумеровано або просто допиши опис."
-        ].join("\n"));
+        ]));
         return { handled: true, command: "awaiting_tz" };
     }
 
@@ -1247,7 +1315,10 @@ async function handleTzCapture(message, draft) {
         };
         const payload = buildPayloadFromTzDraft(directDraft, message);
         setDraft(chatId, { ...directDraft, payload, lastPayload: payload });
-        await sendMessage(chatId, "Критичних уточнень немає або ліміт питань вичерпано. Переходимо до побудови.");
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("👌", "Критичних уточнень немає"),
+            "Переходимо до побудови."
+        ]));
         await sendMessage(chatId, buildConfirmationMessage(payload));
         return { handled: true, command: "ready_without_questions" };
     }
@@ -1324,16 +1395,19 @@ async function handleCollectingAnswers(message, draft) {
             blueprint = fallbackCustomBlueprint(nextDraft.answers, draft.customPlanNotes);
         }
 
-        const summary = [
-            "План кастомної таблиці зібрано.",
-            `Назва плану: ${blueprint.title}`,
-            blueprint.goal ? `Мета: ${blueprint.goal}` : "",
-            `Аркушів у плані: ${Array.isArray(blueprint.sheet_plan) ? blueprint.sheet_plan.length : 0}`,
-            "",
-            "Що далі:",
-            "1) Можемо звузити задачу до готового типу (cashflow / pl / balance / dashboard) і будувати одразу.",
-            "2) Або рухатись у full custom builder за цим blueprint."
-        ].filter(Boolean).join("\n");
+        const summary = joinMessageBlocks([
+            sectionTitle("🗺️", "План кастомної таблиці зібрано"),
+            labelValue("Назва плану", blueprint.title),
+            blueprint.goal ? labelValue("Мета", blueprint.goal) : "",
+            labelValue("Аркушів у плані", Array.isArray(blueprint.sheet_plan) ? blueprint.sheet_plan.length : 0),
+            [
+                sectionTitle("➡️", "Що далі"),
+                ...numberedLines([
+                    "Можемо звузити задачу до готового типу (cashflow / pl / balance / dashboard) і будувати одразу.",
+                    "Або рухатись у full custom builder за цим blueprint."
+                ])
+            ]
+        ]);
 
         setDraft(chatId, {
             ...nextDraft,
@@ -1342,7 +1416,10 @@ async function handleCollectingAnswers(message, draft) {
             customPlanNotes: JSON.stringify(blueprint, null, 2)
         });
         await sendMessage(chatId, summary);
-        await sendMessage(chatId, `Blueprint JSON:\n\n${JSON.stringify(blueprint, null, 2)}`);
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("🧾", "Blueprint JSON"),
+            JSON.stringify(blueprint, null, 2)
+        ]));
         return { handled: true, command: "custom_architect_finished" };
     }
 
@@ -1361,7 +1438,10 @@ async function handleConfirmation(message, draft) {
     const text = normalizeText(message.text);
 
     if (!draft.payload) {
-        await sendMessage(chatId, "Немає готового payload. Надішли ТЗ знову.");
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("⚠️", "Немає готового payload"),
+            "Надішли ТЗ ще раз."
+        ]));
         return { handled: true, command: "confirm_without_payload" };
     }
 
@@ -1369,11 +1449,14 @@ async function handleConfirmation(message, draft) {
 
     if (isRejectBuildText(text)) {
         setDraft(chatId, { ...draft, stage: STAGES.COLLECTING, pendingQuestions: [], questionsQueue: [] });
-        await sendMessage(chatId, "Напиши зміни і я оновлю payload перед побудовою.");
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("✏️", "Ок, вносимо зміни"),
+            "Напиши, що саме треба змінити, і я оновлю payload перед побудовою."
+        ]));
         return { handled: true, command: "confirmation_rejected" };
     }
 
-    await sendMessage(chatId, "Відповідай: так / ні / змінити.");
+    await sendMessage(chatId, "Відповідь: так / ні / змінити.");
     return { handled: true, command: "confirmation_reask" };
 }
 
@@ -1412,7 +1495,10 @@ async function buildUpdatePayloadWithAi(chatId, text, draft) {
         });
     } catch (error) {
         disableAiForChat(chatId, draft, error?.message);
-        await sendMessage(chatId, "Не зміг розпізнати правку через AI, застосовую базовий режим.");
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("⚠️", "Не зміг точно розпізнати правку через AI"),
+            "Перемикаюсь на базовий режим."
+        ]));
         return {
             missing: [],
             message_to_user: "",
@@ -1429,7 +1515,10 @@ async function handleEditingMode(message, draft) {
     if (json && typeof json === "object") {
         const payload = { action: json.action || "update_table", ...json };
         if (String(payload.action).toLowerCase() !== "update_table") {
-            await sendMessage(chatId, "У режимі правок підтримується тільки action=update_table.");
+            await sendMessage(chatId, joinMessageBlocks([
+                sectionTitle("⚠️", "Непідтримувана дія"),
+                "У режимі правок підтримується тільки action=update_table."
+            ]));
             return { handled: true, command: "editing_wrong_action" };
         }
 
@@ -1448,12 +1537,18 @@ async function handleEditingMode(message, draft) {
 
     const aiResult = await buildUpdatePayloadWithAi(chatId, text, draft);
     if (Array.isArray(aiResult.missing) && aiResult.missing.length > 0) {
-        await sendMessage(chatId, aiResult.message_to_user || `Потрібні уточнення: ${aiResult.missing.join(", ")}`);
+        await sendMessage(chatId, aiResult.message_to_user || joinMessageBlocks([
+            sectionTitle("❓", "Потрібні уточнення"),
+            aiResult.missing.join(", ")
+        ]));
         return { handled: true, command: "editing_need_more_data" };
     }
 
     if (!aiResult.update_payload) {
-        await sendMessage(chatId, "Надішли JSON update_table або сформулюй правку точніше.");
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("🛠️", "Не вистачає даних для правки"),
+            "Надішли JSON update_table або сформулюй правку точніше."
+        ]));
         return { handled: true, command: "editing_no_payload" };
     }
 
@@ -1477,14 +1572,20 @@ async function handleUseCommand(message, draft, argRaw) {
     try {
         tablesInfo = await loadTablesForUser(message);
     } catch (error) {
-        await sendMessage(chatId, `Не вдалося отримати список таблиць: ${error.message}`);
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("❌", "Не вдалося отримати список таблиць"),
+            error.message
+        ]));
         return { handled: true, command: "use_load_error" };
     }
 
     const selected = selectTableFromArg(tablesInfo.tables, argRaw);
 
     if (!selected) {
-        await sendMessage(chatId, "Не знайшов таблицю. Використай /tables і потім /use <номер або spreadsheet_id>.");
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("🔎", "Не знайшов таблицю"),
+            "Скористайся /tables, а потім /use <номер або spreadsheet_id>."
+        ]));
         return { handled: true, command: "use_not_found" };
     }
 
@@ -1496,7 +1597,11 @@ async function handleUseCommand(message, draft, argRaw) {
         stage: STAGES.EDITING
     });
 
-    await sendMessage(chatId, `Активна таблиця: ${selected.name}\nID: ${selected.spreadsheet_id}`);
+    await sendMessage(chatId, joinMessageBlocks([
+        sectionTitle("✅", "Активну таблицю вибрано"),
+        labelValue("Назва", selected.name),
+        labelValue("ID", selected.spreadsheet_id)
+    ]));
     return { handled: true, command: "use_table" };
 }
 
@@ -1524,7 +1629,11 @@ async function handleNewCommand(message, draft) {
         spreadsheet_id: draft.activeTableId || null
     });
 
-    await sendMessage(chatId, "Ок, починаємо нову таблицю. Надішли нове ТЗ (можна звичайним текстом).\nАктивну таблицю для правок можна змінити через /use.");
+    await sendMessage(chatId, joinMessageBlocks([
+        sectionTitle("🆕", "Починаємо нову таблицю"),
+        "Надішли нове ТЗ. Можна звичайним текстом.",
+        "Активну таблицю для правок можна змінити через /use."
+    ]));
     return { handled: true, command: "new_flow" };
 }
 
@@ -1546,13 +1655,19 @@ async function handleTelegramUpdate(update) {
         const draft = getDraft(chatId);
 
         if (draft.stage === STAGES.BUILDING && command === "/retry") {
-            await sendMessage(chatId, "Побудова вже триває. Дочекайся завершення поточної спроби.");
+            await sendMessage(chatId, joinMessageBlocks([
+                sectionTitle("⏳", "Побудова вже триває"),
+                "Дочекайся завершення поточної спроби."
+            ]));
             return { handled: true, command };
         }
 
         if (command === "/clear") {
             clearDraft(chatId);
-            await sendMessage(chatId, "🗑 Стан очищено. Можеш починати з нового ТЗ.");
+            await sendMessage(chatId, joinMessageBlocks([
+                sectionTitle("🗑️", "Стан очищено"),
+                "Можеш починати з нового ТЗ."
+            ]));
             return { handled: true, command };
         }
 
@@ -1566,7 +1681,10 @@ async function handleTelegramUpdate(update) {
                 const tablesInfo = await loadTablesForUser(message);
                 await sendMessage(chatId, formatTablesList(tablesInfo, draft));
             } catch (error) {
-                await sendMessage(chatId, `Не вдалося отримати список таблиць: ${error.message}`);
+                await sendMessage(chatId, joinMessageBlocks([
+                    sectionTitle("❌", "Не вдалося отримати список таблиць"),
+                    error.message
+                ]));
             }
             return { handled: true, command };
         }
@@ -1585,10 +1703,13 @@ async function handleTelegramUpdate(update) {
 
         if (command === "/retry") {
             if (!draft.lastPayload) {
-                await sendMessage(chatId, "Немає payload для повтору. Надішли ТЗ або JSON.");
+                await sendMessage(chatId, joinMessageBlocks([
+                    sectionTitle("⚠️", "Немає даних для повтору"),
+                    "Надішли ТЗ або JSON."
+                ]));
                 return { handled: true, command };
             }
-            await sendMessage(chatId, "🔄 Повторюю побудову...");
+            await sendMessage(chatId, sectionTitle("🔄", "Повторюю побудову..."));
             return runBuildAndReply(message, draft, draft.lastPayload, "retry");
         }
 
@@ -1604,7 +1725,10 @@ async function handleTelegramUpdate(update) {
         }
 
         if (draft.stage === STAGES.BUILDING) {
-            await sendMessage(chatId, "Побудова вже триває. Дочекайся завершення або використай /status.");
+            await sendMessage(chatId, joinMessageBlocks([
+                sectionTitle("⏳", "Побудова вже триває"),
+                "Дочекайся завершення або використай /status."
+            ]));
             return { handled: true, command: "build_in_progress" };
         }
 
