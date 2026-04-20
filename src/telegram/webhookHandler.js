@@ -1266,12 +1266,20 @@ async function startCustomArchitectureMode(message, draft) {
 async function parseTzFromAnyText(message, chatId, draft) {
     const parsed = parseTzFromTelegramMessage(message);
     if (parsed.detected && parsed.parsed) {
-        return parsed.tz;
+        return {
+            tz: parsed.tz,
+            inputMode: "structured_tz",
+            parser: parsed.language || "structured"
+        };
     }
 
     const heuristicCashflow = parseCashflowHeuristicFromText(message.text || "");
     if (heuristicCashflow) {
-        return heuristicCashflow;
+        return {
+            tz: heuristicCashflow,
+            inputMode: "free_text",
+            parser: "heuristic"
+        };
     }
 
     if (!shouldUseAi(draft)) {
@@ -1279,7 +1287,11 @@ async function parseTzFromAnyText(message, chatId, draft) {
     }
 
     try {
-        return await generateTzFromFreeText(message.text || "");
+        return {
+            tz: await generateTzFromFreeText(message.text || ""),
+            inputMode: "free_text",
+            parser: "ai"
+        };
     } catch (error) {
         disableAiForChat(chatId, draft, error?.message);
         return null;
@@ -1395,10 +1407,12 @@ async function handleTzCapture(message, draft) {
         return { handled: true, command: "json_payload_confirm" };
     }
 
-    const tz = await parseTzFromAnyText(message, chatId, draft);
+    const parsedInput = await parseTzFromAnyText(message, chatId, draft);
+    const tz = parsedInput?.tz || null;
+    const inputMode = parsedInput?.inputMode || "free_text";
     const routing = detectRoutingMode(text, tz);
 
-    if (routing.mode === "custom") {
+    if (inputMode !== "structured_tz" && routing.mode === "custom") {
         return startCustomArchitectureMode(message, draft);
     }
 
@@ -1424,7 +1438,12 @@ async function handleTzCapture(message, draft) {
     const analysis = analyzeArchitecture(preparedTz);
     const businessNameResolved = await resolveBusinessName(preparedTz, text, message, draft, chatId);
     const questionsQueue = buildQuestionQueue(preparedTz, analysis, draft.askedQuestionsCount);
-    const aiBundle = await buildClarificationWithAi(chatId, preparedTz, analysis, questionsQueue);
+    const aiBundle = inputMode === "structured_tz"
+        ? {
+            message: buildArchitectureMessage(analysis),
+            questions: questionsQueue
+        }
+        : await buildClarificationWithAi(chatId, preparedTz, analysis, questionsQueue);
     const pendingQuestions = nextQuestionBatch(aiBundle.questions);
 
     if (aiBundle.questions.length === 0) {
@@ -1437,6 +1456,7 @@ async function handleTzCapture(message, draft) {
             extracted: readyTz,
             analysis: analyzeArchitecture(readyTz),
             businessNameResolved,
+            inputMode,
             answers: {},
             questionsQueue: [],
             pendingQuestions: []
@@ -1459,6 +1479,7 @@ async function handleTzCapture(message, draft) {
         extracted: preparedTz,
         analysis,
         businessNameResolved,
+        inputMode,
         questionsQueue: aiBundle.questions,
         pendingQuestions,
         askedQuestionsCount: Number(draft.askedQuestionsCount || 0) + pendingQuestions.length,
@@ -1487,7 +1508,9 @@ async function handleCollectingAnswers(message, draft) {
         return { handled: true, command: "clarification_help" };
     }
 
-    const updated = await resolveClarificationAnswersWithAi(chatId, draft, message.text || "")
+    const updated = (draft.inputMode === "free_text"
+        ? await resolveClarificationAnswersWithAi(chatId, draft, message.text || "")
+        : null)
         || applyAnswers(draft, message.text || "");
     const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.answers);
 
