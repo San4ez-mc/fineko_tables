@@ -1,6 +1,6 @@
 ﻿const { buildReports } = require("../google/reportBuilder");
 const { pingAppsScript, buildTableViaAppsScript, updateTableViaAppsScript, listTablesViaAppsScript, validateTableViaAppsScript } = require("../google/appsScriptClient");
-const { sendMessage, sendPhoto } = require("./bot");
+const { sendMessage, editMessageText, deleteMessage, sendPhoto } = require("./bot");
 const { parseTzFromTelegramMessage, analyzeArchitecture } = require("./tzParser");
 const { classifyInput } = require("./inputRouter");
 const { buildActiveQueue } = require("./questionGraph");
@@ -58,6 +58,7 @@ function createEmptyDraft(previous = {}) {
         aiTemporarilyDisabled: false,
         customMode: false,
         customPlanNotes: "",
+        buildProgressMessageId: previous.buildProgressMessageId || null,
         updatedAt: new Date().toISOString()
     };
 }
@@ -806,7 +807,6 @@ function formatAppsScriptResult(result, payload, draft) {
     const active = resolveActiveTable(draft);
     if (active) {
         lines.push("", `Активна таблиця: ${active.name}`);
-        lines.push(`Active ID: ${active.spreadsheet_id}`);
     }
 
     lines.push("", sectionTitle("🚀", "Перші кроки"));
@@ -828,7 +828,6 @@ function formatLegacyResult(result, draft) {
     const active = resolveActiveTable(draft);
     if (active) {
         lines.push("", `Активна таблиця: ${active.name}`);
-        lines.push(`Active ID: ${active.spreadsheet_id}`);
     }
 
     lines.push("", "Щоб основним механізмом був Apps Script, налаштуй APPS_SCRIPT_URL.");
@@ -946,17 +945,66 @@ async function executeBuild(payload) {
     }
 }
 
+async function updateBuildProgressMessage(chatId, draft, title, description) {
+    const text = joinMessageBlocks([
+        sectionTitle(title.emoji, title.text),
+        description
+    ]);
+
+    const currentMessageId = draft.buildProgressMessageId || null;
+    if (currentMessageId) {
+        try {
+            await editMessageText(chatId, currentMessageId, text);
+            return { ...draft, buildProgressMessageId: currentMessageId };
+        } catch (error) {
+            const message = String(error?.message || "");
+            if (!/message is not modified/i.test(message)) {
+                console.warn("Failed to edit build progress message", {
+                    chatId,
+                    messageId: currentMessageId,
+                    error: message
+                });
+            }
+        }
+    }
+
+    const sent = await sendMessage(chatId, text);
+    return { ...draft, buildProgressMessageId: sent?.message_id || null };
+}
+
+async function clearBuildProgressMessage(chatId, draft) {
+    const messageId = draft.buildProgressMessageId || null;
+    if (messageId) {
+        try {
+            await deleteMessage(chatId, messageId);
+        } catch (error) {
+            console.warn("Failed to delete build progress message", {
+                chatId,
+                messageId,
+                error: String(error?.message || error)
+            });
+        }
+    }
+
+    const nextDraft = { ...draft, buildProgressMessageId: null };
+    setDraft(chatId, nextDraft);
+    return nextDraft;
+}
+
 async function runBuildAndReply(message, draft, payload, commandLabel) {
     const chatId = message.chat.id;
-    setDraft(chatId, { ...draft, stage: STAGES.BUILDING, lastPayload: payload });
-    await sendMessage(chatId, joinMessageBlocks([
-        sectionTitle("⚙️", "Будую таблицю"),
-        "Це займе приблизно 30 секунд."
-    ]));
-    await sendMessage(chatId, joinMessageBlocks([
-        sectionTitle("🧱", "Готую структуру"),
-        "Планую аркуші, зв'язки та базові налаштування."
-    ]));
+    let workingDraft = { ...draft, stage: STAGES.BUILDING, lastPayload: payload };
+    setDraft(chatId, workingDraft);
+    workingDraft = await updateBuildProgressMessage(chatId, workingDraft, {
+        emoji: "⚙️",
+        text: "Будую таблицю"
+    }, "Це займе приблизно 30 секунд.");
+    setDraft(chatId, workingDraft);
+    workingDraft = await updateBuildProgressMessage(chatId, workingDraft, {
+        emoji: "🧱",
+        text: "Готую структуру"
+    }, "Планую аркуші, зв'язки та базові налаштування.");
+    setDraft(chatId, workingDraft);
 
     try {
         const build = await executeBuild(payload);
@@ -979,10 +1027,11 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
             };
             setDraft(chatId, updatedDraft);
 
-            await sendMessage(chatId, joinMessageBlocks([
-                sectionTitle("🔍", "Перевіряю файл"),
-                "Дивлюсь формули і цілісність таблиці."
-            ]));
+            let buildUiDraft = await updateBuildProgressMessage(chatId, updatedDraft, {
+                emoji: "🔍",
+                text: "Перевіряю файл"
+            }, "Дивлюсь формули і цілісність таблиці.");
+            setDraft(chatId, buildUiDraft);
 
             let validationResult = null;
             if (activeId) {
@@ -1009,10 +1058,11 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
 
             if (validationResult && validationResult.valid === false) {
                 if (activeId && hasBrokenFormulaError(validationResult)) {
-                    await sendMessage(chatId, joinMessageBlocks([
-                        sectionTitle("🩺", "Знайшов технічний збій у формулах"),
-                        "Пробую виправити автоматично."
-                    ]));
+                    buildUiDraft = await updateBuildProgressMessage(chatId, getDraft(chatId), {
+                        emoji: "🩺",
+                        text: "Знайшов технічний збій у формулах"
+                    }, "Пробую виправити автоматично.");
+                    setDraft(chatId, buildUiDraft);
                     try {
                         await updateTableViaAppsScript({
                             action: "update_table",
@@ -1025,14 +1075,16 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
                     }
 
                     if (validationResult && validationResult.valid) {
-                        await sendMessage(chatId, joinMessageBlocks([
-                            sectionTitle("✅", "Формули виправлено"),
-                            "Завершую налаштування."
-                        ]));
+                        buildUiDraft = await updateBuildProgressMessage(chatId, getDraft(chatId), {
+                            emoji: "✅",
+                            text: "Формули виправлено"
+                        }, "Завершую налаштування.");
+                        setDraft(chatId, buildUiDraft);
                     }
                 }
 
                 if (validationResult && validationResult.valid === false) {
+                    await clearBuildProgressMessage(chatId, getDraft(chatId));
                     await sendMessage(chatId, joinMessageBlocks([
                         sectionTitle("⚠️", "Є проблема під час фінальної перевірки"),
                         "Таблицю я вже зберіг, але для автоматичної доводки потрібно запустити /retry.",
@@ -1044,6 +1096,7 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
                 }
             }
 
+            await clearBuildProgressMessage(chatId, getDraft(chatId));
             const msg = [
                 formatAppsScriptResult(build.result, payload, updatedDraft),
                 validationResult?.warnings?.length
@@ -1081,10 +1134,13 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
         };
         setDraft(chatId, updatedDraft);
 
+        await clearBuildProgressMessage(chatId, updatedDraft);
         await sendMessage(chatId, formatLegacyResult(build.result, updatedDraft));
         return { handled: true, command: commandLabel, engine: "legacy", result: build.result };
     } catch (error) {
-        setDraft(chatId, { ...getDraft(chatId), stage: STAGES.CONFIRMING, lastPayload: payload });
+        const failedDraft = { ...getDraft(chatId), stage: STAGES.CONFIRMING, lastPayload: payload };
+        setDraft(chatId, failedDraft);
+        await clearBuildProgressMessage(chatId, failedDraft);
         await sendMessage(chatId, formatBuildError(error));
         return { handled: true, command: commandLabel, error: error.message };
     }

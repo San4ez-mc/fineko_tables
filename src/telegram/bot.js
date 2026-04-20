@@ -36,6 +36,23 @@ async function sendMessage(chatId, text, options = {}) {
     });
 }
 
+async function editMessageText(chatId, messageId, text, options = {}) {
+    return telegramRequest("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        disable_web_page_preview: true,
+        ...options
+    });
+}
+
+async function deleteMessage(chatId, messageId) {
+    return telegramRequest("deleteMessage", {
+        chat_id: chatId,
+        message_id: messageId
+    });
+}
+
 async function sendPhoto(chatId, photoUrl, caption, options = {}) {
     return telegramRequest("sendPhoto", {
         chat_id: chatId,
@@ -68,6 +85,8 @@ async function setWebhook(webhookUrl, secretToken) {
 
 module.exports = {
     sendMessage,
+    editMessageText,
+    deleteMessage,
     sendPhoto,
     answerCallbackQuery,
     setWebhook
