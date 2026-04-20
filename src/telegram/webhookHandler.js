@@ -399,6 +399,38 @@ function isCentralizedPaymentAnswer(value) {
     return /(через бухгал|оплачує бухгалтер|бухгалтер оплачує|централізовано|не сам|не сама)/i.test(text);
 }
 
+function isAccountablePaymentAnswer(value) {
+    const text = normalizeText(value).toLowerCase();
+    return /(^accountable$|підзвіт|сам платить|сама платить|самостійно|сам |сама )/i.test(text);
+}
+
+function inferInputModeFromAnswers(flowDecision, methodDecision) {
+    const flowText = normalizeText(flowDecision);
+    const methodText = normalizeText(methodDecision).toLowerCase();
+
+    if (!flowText) {
+        return { input_mode: "", payment: "" };
+    }
+
+    if (isCentralizedPaymentAnswer(flowText) || /^centralized$/i.test(flowText)) {
+        return { input_mode: "direct", payment: "centralized" };
+    }
+
+    if (!isAccountablePaymentAnswer(flowText)) {
+        return { input_mode: "", payment: "" };
+    }
+
+    if (methodText.includes("form") || methodText.includes("гугл форм")) {
+        return { input_mode: "form", payment: "accountable" };
+    }
+
+    if (methodText.includes("sheet") || methodText.includes("аркуш")) {
+        return { input_mode: "sheet", payment: "accountable" };
+    }
+
+    return { input_mode: "", payment: "accountable" };
+}
+
 function applyAnswers(draft, text) {
     const queue = Array.isArray(draft.questionQueue) ? draft.questionQueue : [];
     const firstQuestion = queue[0] || null;
@@ -572,9 +604,8 @@ function buildQuestionQueue(tz, _analysis, resolvedAnswers = {}, skippedKeys = [
 
 function buildResponsibleMap(tz, answers = {}) {
     const result = {};
-    let noAccessIndex = 0;
 
-    const addItem = (item) => {
+    const addItem = (item, outflowIndex = null) => {
         const article = normalizeText(item.article || item.name);
         if (!article) return;
 
@@ -584,21 +615,11 @@ function buildResponsibleMap(tz, answers = {}) {
         let payment = hasAccess ? "centralized" : "accountable";
 
         if (!hasAccess) {
-            const flowDecision = normalizeText(answers[`money_flow_${noAccessIndex}`]).toLowerCase();
-            const methodDecision = normalizeText(answers[`no_access_method_${noAccessIndex}`]).toLowerCase();
-
-            if (flowDecision.includes("бух") || flowDecision.includes("accountant") || flowDecision.includes("через")) {
-                inputMode = "direct";
-                payment = "centralized";
-            } else if (methodDecision.includes("form") || methodDecision.includes("гугл форм")) {
-                inputMode = "form";
-                payment = "accountable";
-            } else {
-                inputMode = "sheet";
-                payment = "accountable";
-            }
-
-            noAccessIndex += 1;
+            const flowDecision = outflowIndex === null ? "" : answers[`money_flow_${outflowIndex}`];
+            const methodDecision = outflowIndex === null ? "" : answers[`no_access_method_${outflowIndex}`];
+            const resolvedInput = inferInputModeFromAnswers(flowDecision, methodDecision);
+            inputMode = resolvedInput.input_mode;
+            payment = resolvedInput.payment;
         }
 
         result[article] = {
@@ -609,8 +630,8 @@ function buildResponsibleMap(tz, answers = {}) {
         };
     };
 
-    (Array.isArray(tz.inflows) ? tz.inflows : []).forEach(addItem);
-    (Array.isArray(tz.outflows) ? tz.outflows : []).forEach(addItem);
+    (Array.isArray(tz.inflows) ? tz.inflows : []).forEach((item) => addItem(item, null));
+    (Array.isArray(tz.outflows) ? tz.outflows : []).forEach((item, index) => addItem(item, index));
 
     return result;
 }
@@ -1014,7 +1035,10 @@ async function runBuildAndReply(message, draft, payload, commandLabel) {
                 if (validationResult && validationResult.valid === false) {
                     await sendMessage(chatId, joinMessageBlocks([
                         sectionTitle("⚠️", "Є проблема під час фінальної перевірки"),
-                        "Таблицю я вже зберіг, але для автоматичної доводки потрібно запустити /retry."
+                        "Таблицю я вже зберіг, але для автоматичної доводки потрібно запустити /retry.",
+                        Array.isArray(validationResult.errors) && validationResult.errors.length
+                            ? bulletLines(validationResult.errors.slice(0, 2).map((item) => `Помилка: ${item}`))
+                            : ""
                     ]));
                     return { handled: true, command: commandLabel, engine: "apps_script", result: build.result, validation: validationResult };
                 }
