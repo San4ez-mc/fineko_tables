@@ -2,15 +2,19 @@
 const { pingAppsScript, buildTableViaAppsScript, updateTableViaAppsScript, listTablesViaAppsScript, validateTableViaAppsScript } = require("../google/appsScriptClient");
 const { sendMessage, sendPhoto } = require("./bot");
 const { parseTzFromTelegramMessage, analyzeArchitecture } = require("./tzParser");
+const { classifyInput } = require("./inputRouter");
+const { buildActiveQueue } = require("./questionGraph");
 const {
     isEnabled: isLlmEnabled,
     getConfigSummary,
     generateClarificationBundle,
-    generateClarificationAnswerResolution,
+    resolveClarification,
     generateUpdatePayloadFromText,
-    generateTzFromFreeText,
+    planQuestionsFromFreeText,
+    parseFreeText,
     generateBusinessNameFromText,
-    generateCustomTableBlueprint
+    generateCustomTableBlueprint,
+    runPayloadSelfCheck
 } = require("../ai/agentBrain");
 
 const DRAFTS = new Map();
@@ -27,29 +31,59 @@ const STAGES = {
     EDITING: "editing"
 };
 
-function getDraft(chatId) {
-    return DRAFTS.get(chatId) || {
+function createEmptyDraft(previous = {}) {
+    return {
         stage: STAGES.IDLE,
+        inputMode: null,
         report_type: null,
         raw_input: "",
         extracted: {},
         clarifications: [],
         payload: null,
-        spreadsheet_id: null,
+        spreadsheet_id: previous.spreadsheet_id || null,
         history: [],
         answers: {},
+        resolvedAnswers: {},
+        skippedKeys: [],
+        questionQueue: [],
         questionsQueue: [],
         pendingQuestions: [],
-        lastPayload: null,
+        lastPayload: previous.lastPayload || null,
         legacyFallbackUsed: false,
-        activeTableId: null,
-        activeTableName: null,
+        activeTableId: previous.activeTableId || null,
+        activeTableName: previous.activeTableName || null,
         askedQuestionsCount: 0,
+        questionsCount: 0,
         businessNameResolved: null,
         aiTemporarilyDisabled: false,
         customMode: false,
         customPlanNotes: "",
         updatedAt: new Date().toISOString()
+    };
+}
+
+function getDraft(chatId) {
+    const draft = DRAFTS.get(chatId);
+    if (!draft) {
+        return createEmptyDraft();
+    }
+
+    const resolvedAnswers = draft.resolvedAnswers || draft.answers || {};
+    const questionQueue = draft.questionQueue || draft.questionsQueue || [];
+    const questionsCount = Number(draft.questionsCount || draft.askedQuestionsCount || 0);
+
+    return {
+        ...createEmptyDraft(draft),
+        ...draft,
+        inputMode: draft.inputMode || null,
+        answers: resolvedAnswers,
+        resolvedAnswers,
+        skippedKeys: Array.isArray(draft.skippedKeys) ? draft.skippedKeys : [],
+        questionQueue,
+        questionsQueue: questionQueue,
+        pendingQuestions: Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [],
+        askedQuestionsCount: questionsCount,
+        questionsCount
     };
 }
 
@@ -62,29 +96,7 @@ function setDraft(chatId, draft) {
 
 function clearDraft(chatId) {
     const current = getDraft(chatId);
-    DRAFTS.set(chatId, {
-        stage: STAGES.IDLE,
-        report_type: null,
-        raw_input: "",
-        extracted: {},
-        clarifications: [],
-        payload: null,
-        spreadsheet_id: null,
-        history: [],
-        answers: {},
-        questionsQueue: [],
-        pendingQuestions: [],
-        lastPayload: null,
-        legacyFallbackUsed: false,
-        activeTableId: null,
-        activeTableName: null,
-        askedQuestionsCount: 0,
-        businessNameResolved: null,
-        aiTemporarilyDisabled: false,
-        customMode: false,
-        customPlanNotes: "",
-        updatedAt: new Date().toISOString()
-    });
+    DRAFTS.set(chatId, createEmptyDraft(current));
 }
 
 function pruneProcessedUpdates(nowTs) {
@@ -382,135 +394,29 @@ function normalizeAnswerValue(value, fallback) {
     return text || fallback || "";
 }
 
-function questionGroupKey(questionKey) {
-    return String(questionKey || "").replace(/_\d+$/, "");
-}
-
-function isPaymentQuestion(question) {
-    return /^money_flow_\d+$/.test(String(question?.key || ""));
-}
-
-function isMethodQuestion(question) {
-    return /^no_access_method_\d+$/.test(String(question?.key || ""));
-}
-
-function extractQuestionIndex(questionKey) {
-    const match = String(questionKey || "").match(/_(\d+)$/);
-    return match ? Number(match[1]) : -1;
-}
-
 function isCentralizedPaymentAnswer(value) {
     const text = normalizeText(value).toLowerCase();
-    return /(через бухгалтера|оплачує бухгалтер|бухгалтер оплачує|централізовано|не сам|не сама)/i.test(text);
-}
-
-function isUniversalAnswer(value) {
-    const text = normalizeText(value).toLowerCase();
-    return /(все|усе|всім|усім|теж|однаково|скрізь|усюди)/i.test(text);
-}
-
-function shouldApplyGlobalCentralizedAnswer(text, batch, answers) {
-    if (!Array.isArray(batch) || batch.length === 0) return false;
-    if (!Array.isArray(answers) || answers.length !== 1) return false;
-
-    const raw = String(text || "");
-    if (/^\s*\d+[).]/m.test(raw)) return false;
-
-    return batch.some(isPaymentQuestion) && isUniversalAnswer(text) && isCentralizedPaymentAnswer(text);
-}
-
-function pruneResolvedQuestions(queue, resolvedAnswers) {
-    const list = Array.isArray(queue) ? queue : [];
-    return list.filter((question) => {
-        if (resolvedAnswers[question.key]) {
-            return false;
-        }
-
-        if (isMethodQuestion(question)) {
-            const index = extractQuestionIndex(question.key);
-            const paymentAnswer = resolvedAnswers[`money_flow_${index}`];
-            if (isCentralizedPaymentAnswer(paymentAnswer)) {
-                return false;
-            }
-        }
-
-        return true;
-    });
-}
-
-function shouldBroadcastSingleAnswer(text, batch, answers) {
-    if (!Array.isArray(batch) || batch.length <= 1) return false;
-    if (!Array.isArray(answers) || answers.length !== 1) return false;
-
-    const source = normalizeText(text).toLowerCase();
-    if (!source) return false;
-
-    const hasExplicitNumbering = /^\s*\d+[).]/m.test(String(text || ""));
-    if (hasExplicitNumbering) return false;
-
-    const groups = new Set(batch.map((question) => questionGroupKey(question?.key)));
-    if (groups.size === 1) return true;
-
-    const samePaymentQuestion = batch.every(isPaymentQuestion);
-    if (samePaymentQuestion && /(все|усе|всім|усім|теж|однаково|скрізь|усюди|через бухгалтера|оплачує бухгалтер)/i.test(source)) {
-        return true;
-    }
-
-    const sameMethodQuestion = batch.every(isMethodQuestion);
-    if (sameMethodQuestion && /(все|усе|всім|усім|теж|однаково|скрізь|усюди|google form|окремий аркуш)/i.test(source)) {
-        return true;
-    }
-
-    return false;
+    return /(через бухгал|оплачує бухгалтер|бухгалтер оплачує|централізовано|не сам|не сама)/i.test(text);
 }
 
 function applyAnswers(draft, text) {
-    const answers = splitAnswers(text);
-    const batch = Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [];
-    const fullQueue = Array.isArray(draft.questionsQueue) ? draft.questionsQueue : [];
-    const resolved = { ...(draft.answers || {}) };
+    const queue = Array.isArray(draft.questionQueue) ? draft.questionQueue : [];
+    const firstQuestion = queue[0] || null;
+    const resolvedAnswers = { ...(draft.resolvedAnswers || draft.answers || {}) };
 
-    if (batch.length === 0) {
+    if (!firstQuestion) {
         return {
-            answers: resolved,
-            questionsQueue: fullQueue,
-            pendingQuestions: [],
+            resolvedAnswers,
+            skippedKeys: Array.isArray(draft.skippedKeys) ? draft.skippedKeys : [],
             answeredCount: 0
         };
     }
 
-    if (batch.length === 1) {
-        resolved[batch[0].key] = normalizeAnswerValue(text);
-    } else if (shouldBroadcastSingleAnswer(text, batch, answers)) {
-        batch.forEach((question) => {
-            resolved[question.key] = normalizeAnswerValue(text);
-        });
-    } else {
-        batch.slice(0, answers.length).forEach((question, index) => {
-            resolved[question.key] = normalizeAnswerValue(answers[index]);
-        });
-    }
-
-    if (shouldApplyGlobalCentralizedAnswer(text, batch, answers)) {
-        fullQueue.forEach((question) => {
-            if (isPaymentQuestion(question)) {
-                resolved[question.key] = normalizeAnswerValue(text);
-            }
-        });
-    }
-
-    const answeredCount = batch.length === 1
-        ? 1
-        : shouldBroadcastSingleAnswer(text, batch, answers)
-            ? batch.length
-            : Math.min(batch.length, answers.length);
-    const remainingQueue = pruneResolvedQuestions(fullQueue, resolved);
-
+    resolvedAnswers[firstQuestion.key] = normalizeAnswerValue(text);
     return {
-        answers: resolved,
-        questionsQueue: remainingQueue,
-        pendingQuestions: nextQuestionBatch(remainingQueue),
-        answeredCount
+        resolvedAnswers,
+        skippedKeys: Array.isArray(draft.skippedKeys) ? draft.skippedKeys : [],
+        answeredCount: 1
     };
 }
 
@@ -520,32 +426,22 @@ async function resolveClarificationAnswersWithAi(chatId, draft, text) {
     }
 
     try {
-        const aiResult = await generateClarificationAnswerResolution({
-            user_answer: String(text || ""),
-            pending_questions: Array.isArray(draft.pendingQuestions) ? draft.pendingQuestions : [],
-            all_questions: Array.isArray(draft.questionsQueue) ? draft.questionsQueue : [],
-            current_answers: draft.answers || {},
-            extracted_tz: draft.extracted || {}
-        });
-
-        const resolvedAnswers = {
-            ...(draft.answers || {}),
-            ...(aiResult.resolved_answers || {})
-        };
-        const remainingQueue = pruneResolvedQuestions(
-            (Array.isArray(draft.questionsQueue) ? draft.questionsQueue : []).filter(
-                (question) => !Array.isArray(aiResult.skip_keys) || !aiResult.skip_keys.includes(question.key)
-            ),
-            resolvedAnswers
+        const aiResult = await resolveClarification(
+            String(text || ""),
+            Array.isArray(draft.questionQueue) ? draft.questionQueue : [],
+            draft.resolvedAnswers || draft.answers || {},
+            draft.extracted || {}
         );
 
         return {
-            answers: resolvedAnswers,
-            questionsQueue: remainingQueue,
-            pendingQuestions: nextQuestionBatch(remainingQueue),
-            answeredCount: Object.keys(aiResult.resolved_answers || {}).length,
-            confidence: aiResult.confidence || "",
-            notes: aiResult.notes || ""
+            resolvedAnswers: {
+                ...(draft.resolvedAnswers || draft.answers || {}),
+                ...(aiResult.resolved || {})
+            },
+            skippedKeys: Array.from(new Set([...(draft.skippedKeys || []), ...(aiResult.skipped || [])])),
+            answeredCount: Object.keys(aiResult.resolved || {}).length,
+            confidence: aiResult.confidence || 0,
+            notes: aiResult.interpretation || ""
         };
     } catch (error) {
         disableAiForChat(chatId, draft, error?.message);
@@ -651,38 +547,26 @@ function findNoAccessItemsWithoutMode(tz) {
         .filter((item) => !normalizeText(item.input_mode));
 }
 
-function buildQuestionQueue(tz, _analysis, askedQuestionsCount = 0) {
+function buildQuestionQueue(tz, _analysis, resolvedAnswers = {}, skippedKeys = [], questionsCount = 0) {
     const questions = [];
 
-    if (!normalizeReportType(tz.report_type)) {
+    if (!normalizeReportType(tz.report_type) && !normalizeText(resolvedAnswers.report_type)) {
         questions.push({
             key: "report_type",
             text: "Вкажи тип таблиці: cashflow (рух грошей), pl / P&L (прибутки і збитки), balance (баланс), dashboard (зведений екран з показниками)"
         });
     }
 
-    if (!hasAtLeastOneArticle(tz)) {
+    if (!hasAtLeastOneArticle(tz) && !normalizeText(resolvedAnswers.articles_seed)) {
         questions.push({
             key: "articles_seed",
             text: "Дай мінімум 1-2 статті, тобто які саме гроші заходять і на що витрачаються (формат: Надходження: ..., Витрати: ...)"
         });
     }
 
-    const unresolvedNoAccess = findNoAccessItemsWithoutMode(tz);
-    unresolvedNoAccess.forEach((item, index) => {
-        const person = normalizeText(item.responsible || item.owner || "Співробітник");
-        const article = normalizeText(item.article || item.name || "Стаття");
-        questions.push({
-            key: `money_flow_${index}`,
-            text: `${article} — ${person}: як проходить оплата? Підзвіт = людина платить сама і потім записує витрату. Заявка через бухгалтера = бухгалтер оплачує централізовано.`
-        });
-        questions.push({
-            key: `no_access_method_${index}`,
-            text: `${article} — якщо це підзвіт, як зручніше вносити дані: Google Form (проста форма за посиланням) чи окремий аркуш (окрема вкладка в таблиці)?`
-        });
-    });
+    questions.push(...buildActiveQueue(tz, resolvedAnswers, skippedKeys));
 
-    const budgetLeft = Math.max(0, MAX_TOTAL_QUESTIONS - Number(askedQuestionsCount || 0));
+    const budgetLeft = Math.max(0, MAX_TOTAL_QUESTIONS - Number(questionsCount || 0));
     return questions.slice(0, budgetLeft);
 }
 
@@ -734,7 +618,7 @@ function buildResponsibleMap(tz, answers = {}) {
 function buildPayloadFromTzDraft(draft, message) {
     const identity = getTelegramIdentity(message);
     const tz = draft.extracted || {};
-    const answers = draft.answers || {};
+    const answers = draft.resolvedAnswers || draft.answers || {};
 
     const inflows = (Array.isArray(tz.inflows) ? tz.inflows : [])
         .map((item) => normalizeText(item.article || item.name))
@@ -1012,9 +896,10 @@ function buildStatusMessage(draft) {
         sectionTitle("📍", "Поточний стан"),
         [
             labelValue("Етап", draft.stage),
+            labelValue("Режим вводу", draft.inputMode || "-"),
             labelValue("Тип звіту", draft.report_type || "unknown"),
-            labelValue("Питань залишилось", Array.isArray(draft.questionsQueue) ? draft.questionsQueue.length : 0),
-            labelValue("Питань вже поставлено", `${Number(draft.askedQuestionsCount || 0)} / ${MAX_TOTAL_QUESTIONS}`),
+            labelValue("Питань залишилось", Array.isArray(draft.questionQueue) ? draft.questionQueue.length : 0),
+            labelValue("Питань вже поставлено", `${Number(draft.questionsCount || draft.askedQuestionsCount || 0)} / ${MAX_TOTAL_QUESTIONS}`),
             labelValue("Payload готовий", draft.payload ? "так" : "ні"),
             labelValue("Активна таблиця ID", active?.spreadsheet_id || "-"),
             labelValue("Активна таблиця", draft.activeTableName || "-")
@@ -1191,8 +1076,8 @@ async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) 
     }
 
     try {
-        const questionBudget = Math.max(0, MAX_TOTAL_QUESTIONS - Number(getDraft(chatId).askedQuestionsCount || 0));
-        const ai = await generateClarificationBundle({ tz, analysis, defaultQuestions, questionBudget });
+        const questionBudget = Math.max(0, MAX_TOTAL_QUESTIONS - Number(getDraft(chatId).questionsCount || getDraft(chatId).askedQuestionsCount || 0));
+        const ai = await planQuestionsFromFreeText(tz, { analysis, defaultQuestions, questionBudget });
         const limitedQuestions = (ai.questions.length > 0 ? ai.questions : defaultQuestions).slice(0, questionBudget);
         return {
             message: ai.message || buildArchitectureMessage(analysis),
@@ -1200,7 +1085,7 @@ async function buildClarificationWithAi(chatId, tz, analysis, defaultQuestions) 
         };
     } catch (error) {
         disableAiForChat(chatId, currentDraft, error?.message);
-        const questionBudget = Math.max(0, MAX_TOTAL_QUESTIONS - Number(getDraft(chatId).askedQuestionsCount || 0));
+        const questionBudget = Math.max(0, MAX_TOTAL_QUESTIONS - Number(getDraft(chatId).questionsCount || getDraft(chatId).askedQuestionsCount || 0));
         return {
             message: buildArchitectureMessage(analysis),
             questions: defaultQuestions.slice(0, questionBudget)
@@ -1245,12 +1130,17 @@ async function startCustomArchitectureMode(message, draft) {
     setDraft(chatId, {
         ...draft,
         stage: STAGES.COLLECTING,
+        inputMode: "free_text",
         customMode: true,
         customPlanNotes: rawText,
+        questionQueue: questions,
         questionsQueue: questions,
         pendingQuestions,
         answers: {},
-        askedQuestionsCount: Number(draft.askedQuestionsCount || 0) + pendingQuestions.length
+        resolvedAnswers: {},
+        skippedKeys: [],
+        askedQuestionsCount: Number(draft.questionsCount || draft.askedQuestionsCount || 0) + pendingQuestions.length,
+        questionsCount: Number(draft.questionsCount || draft.askedQuestionsCount || 0) + pendingQuestions.length
     });
 
     await sendMessage(chatId, messageText);
@@ -1268,7 +1158,7 @@ async function parseTzFromAnyText(message, chatId, draft) {
     if (parsed.detected && parsed.parsed) {
         return {
             tz: parsed.tz,
-            inputMode: "structured_tz",
+            inputMode: "tz",
             parser: parsed.language || "structured"
         };
     }
@@ -1288,7 +1178,7 @@ async function parseTzFromAnyText(message, chatId, draft) {
 
     try {
         return {
-            tz: await generateTzFromFreeText(message.text || ""),
+            tz: await parseFreeText(message.text || ""),
             inputMode: "free_text",
             parser: "ai"
         };
@@ -1361,6 +1251,49 @@ function ensureBuildMinimum(tz) {
     return next;
 }
 
+function deterministicPayloadSelfCheck(payload) {
+    const missing = [];
+    if (!normalizeReportType(payload?.report_type)) missing.push("report_type");
+    const inflows = Array.isArray(payload?.articles?.inflows) ? payload.articles.inflows : [];
+    const outflows = Array.isArray(payload?.articles?.outflows) ? payload.articles.outflows : [];
+    if (inflows.length + outflows.length === 0) missing.push("articles");
+    if (!normalizeText(payload?.business_name)) missing.push("business_name");
+
+    Object.entries(payload?.responsible || {}).forEach(([article, item]) => {
+        if (item?.access === false && !normalizeText(item?.input_mode)) {
+            missing.push(`input_mode:${article}`);
+        }
+    });
+
+    return {
+        ready: missing.length === 0,
+        missing
+    };
+}
+
+async function selfCheckPayload(chatId, draft, payload) {
+    if (!shouldUseAi(draft)) {
+        return deterministicPayloadSelfCheck(payload);
+    }
+
+    try {
+        const aiCheck = await runPayloadSelfCheck(payload);
+        if (Array.isArray(aiCheck.missing) && aiCheck.missing.length > 0) {
+            return {
+                ready: false,
+                missing: aiCheck.missing
+            };
+        }
+        return {
+            ready: Boolean(aiCheck.ready),
+            missing: []
+        };
+    } catch (error) {
+        disableAiForChat(chatId, draft, error?.message);
+        return deterministicPayloadSelfCheck(payload);
+    }
+}
+
 function fallbackCustomBlueprint(answers, rawRequest) {
     const values = Object.entries(answers || {}).map(([k, v]) => `${k}: ${String(v || "")}`);
     return {
@@ -1412,7 +1345,7 @@ async function handleTzCapture(message, draft) {
     const inputMode = parsedInput?.inputMode || "free_text";
     const routing = detectRoutingMode(text, tz);
 
-    if (inputMode !== "structured_tz" && routing.mode === "custom") {
+    if (inputMode !== "tz" && routing.mode === "custom") {
         return startCustomArchitectureMode(message, draft);
     }
 
@@ -1437,8 +1370,10 @@ async function handleTzCapture(message, draft) {
 
     const analysis = analyzeArchitecture(preparedTz);
     const businessNameResolved = await resolveBusinessName(preparedTz, text, message, draft, chatId);
-    const questionsQueue = buildQuestionQueue(preparedTz, analysis, draft.askedQuestionsCount);
-    const aiBundle = inputMode === "structured_tz"
+    const resolvedAnswers = {};
+    const skippedKeys = [];
+    const questionsQueue = buildQuestionQueue(preparedTz, analysis, resolvedAnswers, skippedKeys, draft.questionsCount || draft.askedQuestionsCount);
+    const aiBundle = inputMode === "tz"
         ? {
             message: buildArchitectureMessage(analysis),
             questions: questionsQueue
@@ -1457,11 +1392,22 @@ async function handleTzCapture(message, draft) {
             analysis: analyzeArchitecture(readyTz),
             businessNameResolved,
             inputMode,
+            resolvedAnswers,
+            skippedKeys,
             answers: {},
+            questionQueue: [],
             questionsQueue: [],
             pendingQuestions: []
         };
         const payload = buildPayloadFromTzDraft(directDraft, message);
+        const selfCheck = await selfCheckPayload(chatId, directDraft, payload);
+        if (!selfCheck.ready) {
+            await sendMessage(chatId, joinMessageBlocks([
+                sectionTitle("🧩", "Потрібно ще трохи даних"),
+                bulletLines(selfCheck.missing.map((item) => `Не вистачає: ${item}`))
+            ]));
+            return { handled: true, command: "payload_not_ready" };
+        }
         setDraft(chatId, { ...directDraft, payload, lastPayload: payload });
         await sendMessage(chatId, joinMessageBlocks([
             sectionTitle("👌", "Критичних уточнень немає"),
@@ -1480,9 +1426,13 @@ async function handleTzCapture(message, draft) {
         analysis,
         businessNameResolved,
         inputMode,
+        resolvedAnswers,
+        skippedKeys,
+        questionQueue: aiBundle.questions,
         questionsQueue: aiBundle.questions,
         pendingQuestions,
-        askedQuestionsCount: Number(draft.askedQuestionsCount || 0) + pendingQuestions.length,
+        askedQuestionsCount: Number(draft.questionsCount || draft.askedQuestionsCount || 0) + pendingQuestions.length,
+        questionsCount: Number(draft.questionsCount || draft.askedQuestionsCount || 0) + pendingQuestions.length,
         answers: {},
         payload: null,
         history: [...(draft.history || []), { role: "user", content: text }]
@@ -1501,32 +1451,48 @@ async function handleCollectingAnswers(message, draft) {
     const text = normalizeText(message.text || "");
 
     if (looksLikeClarificationRequest(text)) {
-        await sendMessage(chatId, buildClarificationHelp(text, draft.pendingQuestions || []));
-        if ((draft.pendingQuestions || []).length > 0) {
-            await sendMessage(chatId, buildQuestionsMessage("Повертаємось до уточнень:", draft.pendingQuestions || []));
+        const activeBatch = (draft.pendingQuestions || []).length > 0 ? draft.pendingQuestions : nextQuestionBatch(draft.questionQueue || []);
+        await sendMessage(chatId, buildClarificationHelp(text, activeBatch));
+        if (activeBatch.length > 0) {
+            await sendMessage(chatId, buildQuestionsMessage("Повертаємось до уточнень:", activeBatch));
         }
         return { handled: true, command: "clarification_help" };
     }
 
-    const updated = (draft.inputMode === "free_text"
-        ? await resolveClarificationAnswersWithAi(chatId, draft, message.text || "")
-        : null)
+    const updated = (await resolveClarificationAnswersWithAi(chatId, draft, message.text || ""))
         || applyAnswers(draft, message.text || "");
-    const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.answers);
+    const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.resolvedAnswers);
+    const rebuiltQueue = buildQuestionQueue(
+        extractedAfterAnswers,
+        draft.analysis,
+        updated.resolvedAnswers,
+        updated.skippedKeys,
+        draft.questionsCount || draft.askedQuestionsCount
+    );
+    const pendingQuestions = nextQuestionBatch(rebuiltQueue);
+    const nextQuestionsCount = pendingQuestions.length > 0
+        ? Number(draft.questionsCount || draft.askedQuestionsCount || 0) + pendingQuestions.length
+        : Number(draft.questionsCount || draft.askedQuestionsCount || 0);
 
     const nextDraft = {
         ...draft,
-        ...updated,
-        stage: updated.pendingQuestions.length > 0 ? STAGES.COLLECTING : STAGES.CONFIRMING,
+        answers: updated.resolvedAnswers,
+        resolvedAnswers: updated.resolvedAnswers,
+        skippedKeys: updated.skippedKeys,
+        questionQueue: rebuiltQueue,
+        questionsQueue: rebuiltQueue,
+        pendingQuestions,
+        stage: pendingQuestions.length > 0 ? STAGES.COLLECTING : STAGES.CONFIRMING,
         extracted: extractedAfterAnswers,
         report_type: normalizeReportType(extractedAfterAnswers.report_type) || draft.report_type,
-        askedQuestionsCount: Number(draft.askedQuestionsCount || 0),
+        askedQuestionsCount: nextQuestionsCount,
+        questionsCount: nextQuestionsCount,
         clarifications: [...(draft.clarifications || []), normalizeText(message.text)]
     };
 
-    if (updated.pendingQuestions.length > 0) {
+    if (pendingQuestions.length > 0) {
         setDraft(chatId, nextDraft);
-        await sendMessage(chatId, buildQuestionsMessage("Кілька уточнень:", updated.pendingQuestions));
+        await sendMessage(chatId, buildQuestionsMessage("Кілька уточнень:", pendingQuestions));
         return { handled: true, command: "clarify_answers" };
     }
 
@@ -1580,6 +1546,22 @@ async function handleCollectingAnswers(message, draft) {
         extracted: ensureBuildMinimum(nextDraft.extracted)
     };
     const finalPayload = buildPayloadFromTzDraft(readyDraft, message);
+    const selfCheck = await selfCheckPayload(chatId, readyDraft, finalPayload);
+    if (!selfCheck.ready) {
+        setDraft(chatId, {
+            ...readyDraft,
+            stage: STAGES.COLLECTING,
+            questionQueue: [],
+            questionsQueue: [],
+            pendingQuestions: []
+        });
+        await sendMessage(chatId, joinMessageBlocks([
+            sectionTitle("🧩", "Payload ще не готовий"),
+            bulletLines(selfCheck.missing.map((item) => `Не вистачає: ${item}`)),
+            "Напиши відсутні дані одним повідомленням."
+        ]));
+        return { handled: true, command: "payload_self_check_failed" };
+    }
     setDraft(chatId, { ...readyDraft, payload: finalPayload, lastPayload: finalPayload });
     await sendMessage(chatId, buildConfirmationMessage(finalPayload));
     return { handled: true, command: "ready_for_confirmation" };
@@ -1600,7 +1582,13 @@ async function handleConfirmation(message, draft) {
     if (isConfirmBuildText(text)) return runBuildAndReply(message, draft, draft.payload, "confirmed_build");
 
     if (isRejectBuildText(text)) {
-        setDraft(chatId, { ...draft, stage: STAGES.COLLECTING, pendingQuestions: [], questionsQueue: [] });
+        setDraft(chatId, {
+            ...draft,
+            stage: STAGES.COLLECTING,
+            questionQueue: [],
+            questionsQueue: [],
+            pendingQuestions: []
+        });
         await sendMessage(chatId, joinMessageBlocks([
             sectionTitle("✏️", "Ок, вносимо зміни"),
             "Напиши, що саме треба змінити, і я оновлю payload перед побудовою."
@@ -1760,26 +1748,11 @@ async function handleUseCommand(message, draft, argRaw) {
 async function handleNewCommand(message, draft) {
     const chatId = message.chat.id;
 
-    setDraft(chatId, {
-        ...draft,
-        stage: STAGES.IDLE,
-        report_type: null,
-        raw_input: "",
-        extracted: {},
-        clarifications: [],
-        payload: null,
-        answers: {},
-        questionsQueue: [],
-        pendingQuestions: [],
-        askedQuestionsCount: 0,
-        businessNameResolved: null,
-        aiTemporarilyDisabled: false,
-        customMode: false,
-        customPlanNotes: "",
-        activeTableId: draft.activeTableId || null,
-        activeTableName: draft.activeTableName || null,
-        spreadsheet_id: draft.activeTableId || null
-    });
+    const nextDraft = createEmptyDraft(draft);
+    nextDraft.activeTableId = draft.activeTableId || null;
+    nextDraft.activeTableName = draft.activeTableName || null;
+    nextDraft.spreadsheet_id = draft.activeTableId || null;
+    setDraft(chatId, nextDraft);
 
     await sendMessage(chatId, joinMessageBlocks([
         sectionTitle("🆕", "Починаємо нову таблицю"),
@@ -1805,6 +1778,10 @@ async function handleTelegramUpdate(update) {
         const command = extractCommand(text);
         const commandArg = extractCommandArg(text);
         const draft = getDraft(chatId);
+        const inputKind = classifyInput(text, {
+            stage: draft.stage,
+            questionQueue: draft.questionQueue || draft.questionsQueue || []
+        });
 
         if (draft.stage === STAGES.BUILDING && command === "/retry") {
             await sendMessage(chatId, joinMessageBlocks([
@@ -1895,7 +1872,7 @@ async function handleTelegramUpdate(update) {
             return { handled: true, command: "build_in_progress" };
         }
 
-        if (draft.stage === STAGES.COLLECTING && ((draft.pendingQuestions?.length || 0) > 0 || (draft.questionsQueue?.length || 0) > 0)) {
+        if (inputKind === "clarification_answer") {
             return handleCollectingAnswers(message, draft);
         }
 

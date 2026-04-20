@@ -125,12 +125,14 @@ function parseTzMessage(text) {
             detected: true,
             parsed: true,
             tz,
+            parse_failed: false,
             language: codeBlock.language || "tz"
         };
     } catch (error) {
         return {
             detected: true,
             parsed: false,
+            parse_failed: true,
             reason: error.message,
             language: codeBlock.language || ""
         };
@@ -162,16 +164,36 @@ function parseTzLikeText(text) {
             detected: true,
             parsed: true,
             tz,
+            parse_failed: false,
             language: "plain"
         };
     } catch (error) {
         return {
             detected: true,
             parsed: false,
+            parse_failed: true,
             reason: error.message,
             language: "plain"
         };
     }
+}
+
+function parse(text) {
+    const parsed = parseTzMessage(text);
+    if (parsed.detected) {
+        return {
+            extracted: parsed.tz || {},
+            missing_fields: [],
+            parse_failed: parsed.parsed !== true
+        };
+    }
+
+    const plain = parseTzLikeText(text);
+    return {
+        extracted: plain.tz || {},
+        missing_fields: [],
+        parse_failed: plain.parsed !== true
+    };
 }
 
 function parseTzFromTelegramMessage(message) {
@@ -190,12 +212,14 @@ function parseTzFromTelegramMessage(message) {
                 detected: true,
                 parsed: true,
                 tz,
+                parse_failed: false,
                 language: String(preEntity.language || "").toLowerCase() || "pre"
             };
         } catch (error) {
             return {
                 detected: true,
                 parsed: false,
+                parse_failed: true,
                 reason: error.message,
                 language: String(preEntity.language || "").toLowerCase() || "pre"
             };
@@ -277,6 +301,7 @@ function analyzeArchitecture(tz) {
 }
 
 module.exports = {
+    parse,
     parseTzMessage,
     parseTzFromTelegramMessage,
     analyzeArchitecture

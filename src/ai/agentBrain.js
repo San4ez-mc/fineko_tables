@@ -246,7 +246,7 @@ async function generateClarificationBundle(context) {
     };
 }
 
-async function generateClarificationAnswerResolution(input) {
+async function resolveClarification(answer, queue, resolved, extracted) {
     const systemPrompt = [
         "You resolve a user's free-text answer to clarification questions for a Telegram financial table builder.",
         "Return only JSON.",
@@ -258,22 +258,43 @@ async function generateClarificationAnswerResolution(input) {
         "skip_keys should contain only questions that became irrelevant because of the resolved answers."
     ].join(" ");
 
-    const userPrompt = `Context:\n${JSON.stringify(input, null, 2)}\n\nReturn JSON:\n{\n  "resolved_answers": {"question_key":"answer text"},\n  "skip_keys": ["question_key"],\n  "confidence": "high|medium|low",\n  "notes": "short explanation"\n}`;
+    const userPrompt = `Context:\n${JSON.stringify({
+        user_answer: answer,
+        question_queue: Array.isArray(queue) ? queue : [],
+        resolved_answers: resolved || {},
+        extracted_tz: extracted || {}
+    }, null, 2)}\n\nReturn JSON:\n{\n  "resolved": {"question_key":"normalized value"},\n  "skipped": ["question_key"],\n  "confidence": 0.0,\n  "interpretation": "short explanation"\n}`;
 
     const data = await callJsonTask({ systemPrompt, userPrompt });
     return {
-        resolved_answers: data.resolved_answers && typeof data.resolved_answers === "object" && !Array.isArray(data.resolved_answers)
+        resolved: data.resolved && typeof data.resolved === "object" && !Array.isArray(data.resolved)
             ? Object.fromEntries(
-                Object.entries(data.resolved_answers)
+                Object.entries(data.resolved)
                     .map(([key, value]) => [String(key || "").trim(), String(value || "").trim()])
                     .filter(([key, value]) => key && value)
             )
             : {},
-        skip_keys: Array.isArray(data.skip_keys)
-            ? data.skip_keys.map((item) => String(item || "").trim()).filter(Boolean)
+        skipped: Array.isArray(data.skipped)
+            ? data.skipped.map((item) => String(item || "").trim()).filter(Boolean)
             : [],
-        confidence: String(data.confidence || "").trim().toLowerCase(),
-        notes: String(data.notes || "").trim()
+        confidence: Number.isFinite(Number(data.confidence)) ? Number(data.confidence) : 0,
+        interpretation: String(data.interpretation || "").trim()
+    };
+}
+
+async function generateClarificationAnswerResolution(input) {
+    const result = await resolveClarification(
+        input?.user_answer,
+        input?.all_questions || input?.question_queue || input?.pending_questions || [],
+        input?.current_answers || input?.resolved_answers || {},
+        input?.extracted_tz || input?.extracted || {}
+    );
+
+    return {
+        resolved_answers: result.resolved,
+        skip_keys: result.skipped,
+        confidence: result.confidence,
+        notes: result.interpretation
     };
 }
 
@@ -334,7 +355,7 @@ async function generateUpdatePayloadFromText(input) {
     };
 }
 
-async function generateTzFromFreeText(input) {
+async function parseFreeText(input) {
     const systemPrompt = [
         "You convert unstructured user text into TZ JSON for financial table builder.",
         "Return only JSON.",
@@ -354,13 +375,44 @@ async function generateTzFromFreeText(input) {
     };
 }
 
+async function generateTzFromFreeText(input) {
+    return parseFreeText(input);
+}
+
+async function planQuestionsFromFreeText(extracted, context = {}) {
+    return generateClarificationBundle({
+        ...context,
+        tz: extracted,
+        mode: "free_text"
+    });
+}
+
+async function runPayloadSelfCheck(payload) {
+    const systemPrompt = [
+        "You verify whether a financial table payload is complete enough for build.",
+        "Return only JSON.",
+        "Be strict but concise."
+    ].join(" ");
+
+    const userPrompt = `Payload:\n${JSON.stringify(payload || {}, null, 2)}\n\nReturn JSON:\n{\n  "ready": true,\n  "missing": ["..."]\n}`;
+    const data = await callJsonTask({ systemPrompt, userPrompt });
+    return {
+        ready: Boolean(data.ready),
+        missing: Array.isArray(data.missing) ? data.missing.map((item) => String(item || "").trim()).filter(Boolean) : []
+    };
+}
+
 module.exports = {
     isEnabled,
     getConfigSummary,
     generateClarificationBundle,
+    resolveClarification,
     generateClarificationAnswerResolution,
+    planQuestionsFromFreeText,
     generateUpdatePayloadFromText,
+    parseFreeText,
     generateTzFromFreeText,
     generateBusinessNameFromText,
-    generateCustomTableBlueprint
+    generateCustomTableBlueprint,
+    runPayloadSelfCheck
 };
