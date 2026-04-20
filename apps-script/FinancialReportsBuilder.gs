@@ -1,6 +1,11 @@
 var ROOT_FOLDER_NAME = 'Фінансова система — Курс';
 var DEFAULT_SHARE_MODE = 'anyone_with_link';
 var SETTINGS_SHEET_NAME = '⚙️ Налаштування';
+var DEBUG_LOG_FILE_NAME = 'DEBUG_APP_SCRIPT_LOGS';
+var DEBUG_LOG_SHEET_NAME = 'Logs';
+var DEBUG_LOG_PROPERTY_KEY = 'DEBUG_LOG_SPREADSHEET_ID';
+var CURRENT_TRACE_ID = '';
+var CURRENT_ACTION = '';
 var INPUT_THEME = {
   HEADER_BG: '#1A56DB',
   HEADER_TEXT: '#FFFFFF',
@@ -148,11 +153,96 @@ function columnToLetter_(col) {
   return letter;
 }
 
+function safeStringify_(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    return JSON.stringify({ message: 'stringify_failed', error: String(err && err.message || err) });
+  }
+}
+
+function getDebugLogSpreadsheet_() {
+  var props = PropertiesService.getScriptProperties();
+  var existingId = props.getProperty(DEBUG_LOG_PROPERTY_KEY);
+
+  if (existingId) {
+    try {
+      return SpreadsheetApp.openById(existingId);
+    } catch (err) {
+      props.deleteProperty(DEBUG_LOG_PROPERTY_KEY);
+    }
+  }
+
+  var rootFolder = getOrCreateRootFolder_();
+  var file = SpreadsheetApp.create(DEBUG_LOG_FILE_NAME);
+  var spreadsheet = SpreadsheetApp.openById(file.getId());
+  var driveFile = DriveApp.getFileById(file.getId());
+  rootFolder.addFile(driveFile);
+  DriveApp.getRootFolder().removeFile(driveFile);
+
+  var sheet = spreadsheet.getSheets()[0];
+  sheet.setName(DEBUG_LOG_SHEET_NAME);
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 8).setValues([['timestamp', 'trace_id', 'level', 'action', 'step', 'message', 'details_json', 'user_key']]);
+  sheet.setFrozenRows(1);
+
+  props.setProperty(DEBUG_LOG_PROPERTY_KEY, spreadsheet.getId());
+  return spreadsheet;
+}
+
+function appendDebugLog_(level, step, message, details) {
+  try {
+    var spreadsheet = getDebugLogSpreadsheet_();
+    var sheet = spreadsheet.getSheetByName(DEBUG_LOG_SHEET_NAME) || spreadsheet.getSheets()[0];
+    var userKey = '';
+    if (details && typeof details === 'object') {
+      userKey = String(details.telegram_id || details.spreadsheet_id || details.business_name || '');
+    }
+
+    sheet.appendRow([
+      new Date(),
+      CURRENT_TRACE_ID || '',
+      String(level || 'INFO').toUpperCase(),
+      CURRENT_ACTION || '',
+      step || '',
+      message || '',
+      safeStringify_(details || {}),
+      userKey
+    ]);
+  } catch (err) {
+    Logger.log(JSON.stringify({
+      trace_id: CURRENT_TRACE_ID || '',
+      event: 'debug_log_write_failed',
+      level: level || 'INFO',
+      step: step || '',
+      message: String(err && err.message || err)
+    }));
+  }
+}
+
+function logInfo_(step, message, details) {
+  Logger.log(JSON.stringify({ trace_id: CURRENT_TRACE_ID || '', level: 'INFO', step: step, message: message, details: details || {} }));
+  appendDebugLog_('INFO', step, message, details);
+}
+
+function logError_(step, message, details) {
+  Logger.log(JSON.stringify({ trace_id: CURRENT_TRACE_ID || '', level: 'ERROR', step: step, message: message, details: details || {} }));
+  appendDebugLog_('ERROR', step, message, details);
+}
+
 function doPost(e) {
   var traceId = 'as_' + new Date().getTime() + '_' + Math.floor(Math.random() * 1000000);
   try {
     var payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.start', action: payload.action || '', report_type: payload.report_type || '', telegram_id: payload.telegram_id || '' }));
+    CURRENT_TRACE_ID = traceId;
+    CURRENT_ACTION = String(payload.action || '');
+    logInfo_('doPost.start', 'Apps Script request started', {
+      action: payload.action || '',
+      report_type: payload.report_type || '',
+      telegram_id: payload.telegram_id || '',
+      spreadsheet_id: payload.spreadsheet_id || '',
+      changes_count: Array.isArray(payload.changes) ? payload.changes.length : 0
+    });
     var output;
 
     switch (payload.action) {
@@ -179,15 +269,34 @@ function doPost(e) {
     try {
       var content = output && output.getContent ? output.getContent() : '';
       var parsed = content ? JSON.parse(content) : {};
-      Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.end', action: payload.action || '', status: parsed.status || '', valid: parsed.valid, errors_count: (parsed.errors || []).length, warnings_count: (parsed.warnings || []).length }));
+      var logSpreadsheet = getDebugLogSpreadsheet_();
+      parsed.trace_id = parsed.trace_id || traceId;
+      parsed.log_sheet_url = parsed.log_sheet_url || logSpreadsheet.getUrl();
+
+      logInfo_('doPost.end', 'Apps Script request finished', {
+        action: payload.action || '',
+        status: parsed.status || '',
+        valid: parsed.valid,
+        errors_count: (parsed.errors || []).length,
+        warnings_count: (parsed.warnings || []).length,
+        log_sheet_url: parsed.log_sheet_url
+      });
+
+      return respond(parsed);
     } catch (logErr) {
-      Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.end.log_error', message: String(logErr && logErr.message || logErr) }));
+      logError_('doPost.end.parse_failed', 'Failed to parse action response for final logging', {
+        error: String(logErr && logErr.message || logErr)
+      });
     }
 
     return output;
   } catch (err) {
-    Logger.log(JSON.stringify({ trace_id: traceId, event: 'doPost.error', message: String(err && err.message || err) }));
-    return respond({ status: 'error', message: err.message, details: err.stack, trace_id: traceId });
+    CURRENT_TRACE_ID = traceId;
+    logError_('doPost.error', 'Unhandled Apps Script error', {
+      error: String(err && err.message || err),
+      stack: String(err && err.stack || '')
+    });
+    return respond({ status: 'error', message: err.message, details: err.stack, trace_id: traceId, log_sheet_url: getDebugLogSpreadsheet_().getUrl() });
   }
 }
 
@@ -199,6 +308,12 @@ function respond(obj) {
 
 function buildTable(payload) {
   try {
+    logInfo_('build_table.validate_payload', 'Validating build payload', {
+      business_name: payload.business_name || '',
+      report_type: payload.report_type || '',
+      inflows: Array.isArray(payload.articles && payload.articles.inflows) ? payload.articles.inflows.length : 0,
+      outflows: Array.isArray(payload.articles && payload.articles.outflows) ? payload.articles.outflows.length : 0
+    });
     validatePayload(payload);
 
     var year = new Date().getFullYear();
@@ -208,6 +323,10 @@ function buildTable(payload) {
     var rootFolder = getOrCreateRootFolder_();
     var clientFolderName = buildClientFolderName_(payload);
     var clientFolder = getOrCreateFolder(rootFolder, clientFolderName);
+    logInfo_('build_table.prepare_drive', 'Prepared client folder', {
+      client_folder: clientFolderName,
+      root_folder: ROOT_FOLDER_NAME
+    });
 
     var baseFileName = titleByType_(reportType) + '_' + businessName + '_' + year;
     var resolvedFileName = resolveFileName(clientFolder, baseFileName);
@@ -216,6 +335,11 @@ function buildTable(payload) {
     var file = DriveApp.getFileById(ss.getId());
     clientFolder.addFile(file);
     DriveApp.getRootFolder().removeFile(file);
+    logInfo_('build_table.file_created', 'Spreadsheet file created', {
+      spreadsheet_id: ss.getId(),
+      file_name: resolvedFileName,
+      spreadsheet_url: ss.getUrl()
+    });
 
     var context = {
       payload: payload,
@@ -228,24 +352,38 @@ function buildTable(payload) {
     };
 
     if (reportType === 'cashflow') {
+      logInfo_('build_table.build_cashflow', 'Building cashflow workbook', {});
       buildCashflow_(context);
     } else if (reportType === 'pl') {
+      logInfo_('build_table.build_pl', 'Building P&L workbook', {});
       buildPl_(context);
     } else if (reportType === 'balance') {
+      logInfo_('build_table.build_balance', 'Building balance workbook', {});
       buildBalance_(context);
     } else {
+      logInfo_('build_table.build_dashboard', 'Building dashboard workbook', {});
       buildDashboard_(context);
     }
 
     buildInstructionSheet(ss, payload);
+    logInfo_('build_table.instruction_sheet', 'Instruction sheet built', {});
 
     if (payload.options && payload.options.formatting) {
       applyWorkbookTheme_(ss);
+      logInfo_('build_table.apply_theme', 'Workbook formatting applied', {});
     }
 
     setPermissions(clientFolder, file, payload.user_email, payload.share_mode || DEFAULT_SHARE_MODE);
+    logInfo_('build_table.permissions', 'Permissions configured', {
+      share_mode: payload.share_mode || DEFAULT_SHARE_MODE,
+      user_email: payload.user_email || ''
+    });
 
     var validation = validateBuiltFile(ss, payload);
+    logInfo_('build_table.validation', 'Post-build validation finished', {
+      valid: validation.valid,
+      errors_count: Array.isArray(validation.errors) ? validation.errors.length : 0
+    });
     var files = [{
       name: resolvedFileName,
       url: ss.getUrl(),
@@ -259,18 +397,30 @@ function buildTable(payload) {
       files: files,
       forms: context.forms,
       sheets_built: context.sheetsBuilt,
-      validation: validation
+      validation: validation,
+      trace_id: CURRENT_TRACE_ID || '',
+      log_sheet_url: getDebugLogSpreadsheet_().getUrl()
     });
   } catch (err) {
+    logError_('build_table.error', 'Build table failed', {
+      error: err.message,
+      stack: String(err && err.stack || '')
+    });
     return respond({
       status: 'error',
       message: 'Не вдалося побудувати таблицю',
-      details: err.message
+      details: err.message,
+      trace_id: CURRENT_TRACE_ID || '',
+      log_sheet_url: getDebugLogSpreadsheet_().getUrl()
     });
   }
 }
 
 function listTables(payload) {
+  logInfo_('list_tables.start', 'Listing user tables', {
+    telegram_id: payload && payload.telegram_id || '',
+    telegram_username: payload && payload.telegram_username || ''
+  });
   var rootFolder = getOrCreateRootFolder_();
   var clientFolderName = buildClientFolderName_(payload || {});
   var clientFolder = findFolderByName_(rootFolder, clientFolderName);
@@ -281,7 +431,9 @@ function listTables(payload) {
       folder_exists: false,
       client_folder: clientFolderName,
       folder_url: null,
-      tables: []
+      tables: [],
+      trace_id: CURRENT_TRACE_ID || '',
+      log_sheet_url: getDebugLogSpreadsheet_().getUrl()
     });
   }
 
@@ -311,7 +463,9 @@ function listTables(payload) {
     folder_exists: true,
     client_folder: clientFolderName,
     folder_url: clientFolder.getUrl(),
-    tables: tables
+    tables: tables,
+    trace_id: CURRENT_TRACE_ID || '',
+    log_sheet_url: getDebugLogSpreadsheet_().getUrl()
   });
 }
 
@@ -321,6 +475,10 @@ function updateTable(payload) {
   }
 
   var changes = Array.isArray(payload.changes) ? payload.changes : [];
+  logInfo_('update_table.start', 'Updating spreadsheet', {
+    spreadsheet_id: payload.spreadsheet_id,
+    changes_count: changes.length
+  });
   var ss = SpreadsheetApp.openById(payload.spreadsheet_id);
   var results = [];
 
@@ -329,32 +487,43 @@ function updateTable(payload) {
     try {
       switch (change.type) {
         case 'add_article':
+          logInfo_('update_table.change', 'Applying add_article', change);
           results.push(addArticle_(ss, change));
           break;
         case 'remove_article':
+          logInfo_('update_table.change', 'Applying remove_article', change);
           results.push(removeArticle_(ss, change));
           break;
         case 'rename_article':
+          logInfo_('update_table.change', 'Applying rename_article', change);
           results.push(renameArticle_(ss, change));
           break;
         case 'add_sheet':
+          logInfo_('update_table.change', 'Applying add_sheet', change);
           results.push(addSheet_(ss, change));
           break;
         case 'remove_sheet':
+          logInfo_('update_table.change', 'Applying remove_sheet', change);
           results.push(removeSheet_(ss, change));
           break;
         case 'repair_formulas':
+          logInfo_('update_table.change', 'Applying repair_formulas', change);
           results.push(repairFormulas_(ss));
           break;
         default:
+          logInfo_('update_table.change', 'Unknown update change type', change);
           results.push({ type: change.type, status: 'unknown type' });
       }
     } catch (err) {
+      logError_('update_table.change_error', 'Failed to apply change', {
+        change: change,
+        error: err.message
+      });
       results.push({ type: change.type, status: 'error', message: err.message });
     }
   }
 
-  return respond({ status: 'ok', changes_applied: results });
+  return respond({ status: 'ok', changes_applied: results, trace_id: CURRENT_TRACE_ID || '', log_sheet_url: getDebugLogSpreadsheet_().getUrl() });
 }
 
 function validateTableAction(payload) {
@@ -363,6 +532,9 @@ function validateTableAction(payload) {
   }
 
   var ss = SpreadsheetApp.openById(payload.spreadsheet_id);
+  logInfo_('validate_table.start', 'Running validation', {
+    spreadsheet_id: payload.spreadsheet_id
+  });
   var errors = [];
   var warnings = [];
   var names = ss.getSheets().map(function(s) { return s.getName(); });
@@ -436,7 +608,9 @@ function validateTableAction(payload) {
     valid: errors.length === 0,
     errors: errors,
     warnings: warnings,
-    sheets_found: names
+    sheets_found: names,
+    trace_id: CURRENT_TRACE_ID || '',
+    log_sheet_url: getDebugLogSpreadsheet_().getUrl()
   });
 }
 
