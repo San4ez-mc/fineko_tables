@@ -2,6 +2,69 @@ function normalizeText(value) {
     return String(value || "").trim();
 }
 
+function resolveReportType(text, state = {}) {
+    const explicit = normalizeText(state.reportType || state.report_type).toLowerCase();
+    if (["cashflow", "pl", "balance", "cashflow_and_pl", "dashboard"].includes(explicit)) {
+        return explicit;
+    }
+
+    const source = String(text || "").toLowerCase();
+    if ((/(кешфлоу|кеш\s*флоу|cash\s*flow|cashflow)/i.test(source)) && (/(p&l|\bpl\b|profit\s*(and|&)\s*loss|прибутк(и|у)?\s*і\s*збитк(и|ів))/i.test(source))) return "cashflow_and_pl";
+    if (/(кешфлоу|кеш\s*флоу|кефлоу|cash\s*flow|cashflow)/i.test(source)) return "cashflow";
+    if (/(p&l|\bpl\b|п\s*&\s*л|profit\s*(and|&)\s*loss|прибутк(и|у)?\s*і\s*збитк(и|ів))/i.test(source)) return "pl";
+    if (/(баланс|balance)/i.test(source)) return "balance";
+    if (/(дашборд|dashboard)/i.test(source)) return "dashboard";
+    return "";
+}
+
+function isArticleOnlyCashflowSource(text, state = {}) {
+    const source = String(text || "");
+    const fileName = normalizeText(state.fileName || state.file_name).toLowerCase();
+
+    if (fileName === "cashflow_articles.md") {
+        return true;
+    }
+
+    const normalizedLines = source
+        .split(/\r?\n/)
+        .map((line) => normalizeText(line))
+        .filter(Boolean);
+
+    if (normalizedLines.length === 0) {
+        return false;
+    }
+
+    const keyedLines = normalizedLines.filter((line) => /^[a-zа-яіїє_][a-zа-яіїє0-9_\s-]*\s*:/i.test(line));
+    const allowedKeys = /^(business_name|report_type|inflows|outflows|надходження|витрати)\s*:/i;
+    const hasArticleSections = keyedLines.some((line) => /^(inflows|outflows|надходження|витрати)\s*:/i.test(line));
+    const hasOnlyAllowedKeys = keyedLines.every((line) => allowedKeys.test(line));
+
+    if (keyedLines.length > 0) {
+        return hasArticleSections && hasOnlyAllowedKeys;
+    }
+
+    const compactArticleList = /(?:^|\n)\s*(надходження|витрати)\s*:/i.test(source)
+        && !/[.!?]/.test(source)
+        && normalizedLines.length <= 6;
+
+    return compactArticleList;
+}
+
+function isMinimalCashflowTz(text, state = {}) {
+    const source = String(text || "");
+    const fileName = normalizeText(state.fileName || state.file_name).toLowerCase();
+    const reportType = resolveReportType(source, state);
+    const isCashflowFile = fileName === "cashflow_articles.md";
+    const hasCashflowType = reportType === "cashflow" || isCashflowFile;
+
+    if (!hasCashflowType) return false;
+    if (!isArticleOnlyCashflowSource(source, state)) return false;
+    if (/(платіжний\s*календар|відповідальн|форма|налаштування|логи|лог\b|персональні\s*аркуші)/i.test(source)) return false;
+    if (/(^|\b)mode\s*:\s*(full|similar)\b/i.test(source)) return false;
+
+    return true;
+}
+
 function looksLikeStructuredTz(text) {
     const source = String(text || "");
     if (!source.trim()) return false;
@@ -21,6 +84,10 @@ function classifyInput(text, state = {}) {
         return "clarification_answer";
     }
 
+    if (isMinimalCashflowTz(source, state)) {
+        return "minimal_cashflow_tz";
+    }
+
     if (looksLikeStructuredTz(source)) {
         return "structured_tz";
     }
@@ -30,5 +97,6 @@ function classifyInput(text, state = {}) {
 
 module.exports = {
     classifyInput,
-    looksLikeStructuredTz
+    looksLikeStructuredTz,
+    isMinimalCashflowTz
 };

@@ -696,6 +696,7 @@ function buildCashflow_(ctx) {
   var articles = payload.articles || {};
   var responsible = payload.responsible || {};
   var options = payload.options || {};
+  var isMinimalBuild = payload.build_mode === 'minimal';
 
   renameDefaultSheet_(ss, '📊 Cashflow');
   ctx.sheetsBuilt.push('📊 Cashflow');
@@ -721,41 +722,45 @@ function buildCashflow_(ctx) {
   var formRequired = false;
   var seenPeople = {};
 
-  Object.keys(responsible).forEach(function(article) {
-    var item = responsible[article] || {};
-    if (item.input_mode === 'sheet' && item.name && !seenPeople[item.name]) {
-      seenPeople[item.name] = true;
-      var title = '⬆️ Витрати — ' + item.name;
-      extraExpenseSheets.push(title);
-      var personalSheet = ensureSheet_(ss, title);
-      setupPersonalExpenseSheet_(personalSheet);
-      ctx.sheetsBuilt.push(title);
-    }
+  if (!isMinimalBuild) {
+    Object.keys(responsible).forEach(function(article) {
+      var item = responsible[article] || {};
+      if (item.input_mode === 'sheet' && item.name && !seenPeople[item.name]) {
+        seenPeople[item.name] = true;
+        var title = '⬆️ Витрати — ' + item.name;
+        extraExpenseSheets.push(title);
+        var personalSheet = ensureSheet_(ss, title);
+        setupPersonalExpenseSheet_(personalSheet);
+        ctx.sheetsBuilt.push(title);
+      }
 
-    if (item.input_mode === 'form') {
-      formRequired = true;
-    }
-  });
+      if (item.input_mode === 'form') {
+        formRequired = true;
+      }
+    });
+  }
 
-  if (options.payment_calendar) {
+  if (!isMinimalBuild && options.payment_calendar) {
     var calendar = ensureSheet_(ss, '📅 Платіжний календар');
     setupPaymentCalendar_(calendar);
     ctx.sheetsBuilt.push('📅 Платіжний календар');
   }
 
-  if (formRequired) {
+  if (!isMinimalBuild && formRequired) {
     var logSheet = ensureSheet_(ss, '📝 Лог');
     setupLogSheet_(logSheet);
     ctx.sheetsBuilt.push('📝 Лог');
   }
 
-  var refs = ensureSheet_(ss, '🔗 References');
-  setupReferencesSheet_(refs, ss.getUrl());
-  ctx.sheetsBuilt.push('🔗 References');
+  if (!isMinimalBuild) {
+    var refs = ensureSheet_(ss, '🔗 References');
+    setupReferencesSheet_(refs, ss.getUrl());
+    ctx.sheetsBuilt.push('🔗 References');
 
-  var settings = ensureSheet_(ss, '⚙️ Налаштування');
-  setupSettingsSheet_(settings, payload.business_name);
-  ctx.sheetsBuilt.push('⚙️ Налаштування');
+    var settings = ensureSheet_(ss, '⚙️ Налаштування');
+    setupSettingsSheet_(settings, payload.business_name);
+    ctx.sheetsBuilt.push('⚙️ Налаштування');
+  }
 
   var directories = ensureSheet_(ss, '📋 Довідники');
   setupDirectories_(ss, directories, articles, responsible, options);
@@ -775,7 +780,7 @@ function buildCashflow_(ctx) {
     }
   });
 
-  ['📊 Cashflow', '📋 Довідники', '⚙️ Налаштування', '🔗 References'].forEach(function(name) {
+  ['📊 Cashflow', '📋 Довідники', '⚙️ Налаштування', '🔗 References', '📖 Інструкція'].forEach(function(name) {
     var sh = ss.getSheetByName(name);
     if (sh) {
       autoResizeAllColumns(sh);
@@ -783,7 +788,7 @@ function buildCashflow_(ctx) {
     }
   });
 
-  if (formRequired) {
+  if (!isMinimalBuild && formRequired) {
     var createdForms = createFormsForResponsible_(payload, ss.getId());
     for (var i = 0; i < createdForms.length; i++) {
       ctx.forms.push(createdForms[i]);
@@ -1608,6 +1613,10 @@ function removeSheet_(ss, change) {
 
 function getRequiredSheets_(payload, reportType) {
   if (reportType === 'cashflow') {
+    if (payload.build_mode === 'minimal') {
+      return ['📊 Cashflow', '⬇️ Надходження', '⬆️ Витрати', '📋 Довідники', '📖 Інструкція'];
+    }
+
     var list = ['📊 Cashflow', '⬇️ Надходження', '⬆️ Витрати', '📋 Довідники', '⚙️ Налаштування', '🔗 References'];
     if (payload.options && payload.options.payment_calendar) {
       list.push('📅 Платіжний календар');

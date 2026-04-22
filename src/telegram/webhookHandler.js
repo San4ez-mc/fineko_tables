@@ -22,6 +22,7 @@ const CHAT_QUEUES = new Map();
 const PROCESSED_UPDATES = new Map();
 const MAX_TOTAL_QUESTIONS = 15;
 const UPDATE_DEDUP_TTL_MS = 10 * 60 * 1000;
+const TELEGRAM_API_BASE = "https://api.telegram.org";
 
 const STAGES = {
     IDLE: "idle",
@@ -164,6 +165,80 @@ function extractCommand(text) {
 function extractCommandArg(text) {
     const parts = String(text || "").trim().split(/\s+/);
     return parts.length > 1 ? parts.slice(1).join(" ") : "";
+}
+
+function getTelegramBotToken() {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) {
+        throw new Error("Missing TELEGRAM_BOT_TOKEN");
+    }
+    return token;
+}
+
+async function telegramGetJson(pathname, searchParams = {}) {
+    const token = getTelegramBotToken();
+    const query = new URLSearchParams(searchParams).toString();
+    const url = `${TELEGRAM_API_BASE}/bot${token}/${pathname}${query ? `?${query}` : ""}`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!response.ok || !data?.ok) {
+        throw new Error(`Telegram API error: ${response.status} ${JSON.stringify(data)}`);
+    }
+
+    return data.result;
+}
+
+async function downloadTelegramFileText(filePath) {
+    const token = getTelegramBotToken();
+    const response = await fetch(`${TELEGRAM_API_BASE}/file/bot${token}/${filePath}`);
+    if (!response.ok) {
+        throw new Error(`Telegram file download failed: ${response.status}`);
+    }
+    return response.text();
+}
+
+function isMarkdownDocument(message) {
+    const document = message?.document;
+    if (!document) return false;
+    const fileName = normalizeText(document.file_name).toLowerCase();
+    const mimeType = normalizeText(document.mime_type).toLowerCase();
+    return fileName.endsWith(".md") || mimeType === "text/markdown" || mimeType === "text/plain";
+}
+
+function mergeDocumentText(caption, documentText) {
+    return joinMessageBlocks([
+        normalizeText(caption),
+        normalizeText(documentText)
+    ]);
+}
+
+async function hydrateMessageTextFromDocument(message) {
+    if (!isMarkdownDocument(message)) {
+        return message;
+    }
+
+    const fileId = normalizeText(message?.document?.file_id);
+    if (!fileId) {
+        return message;
+    }
+
+    const fileMeta = await telegramGetJson("getFile", { file_id: fileId });
+    const filePath = normalizeText(fileMeta?.file_path);
+    if (!filePath) {
+        throw new Error("Telegram getFile did not return file_path");
+    }
+
+    const documentText = await downloadTelegramFileText(filePath);
+    return {
+        ...message,
+        text: mergeDocumentText(message.caption || "", documentText),
+        caption: message.caption || "",
+        document: {
+            ...(message.document || {}),
+            file_path: filePath
+        }
+    };
 }
 
 function getChatId(message) {
@@ -748,7 +823,7 @@ function buildPayloadFromTzDraft(draft, message) {
         .map((item) => normalizeText(item))
         .filter(Boolean);
 
-    return {
+    const payload = {
         action: "build_table",
         report_type: normalizeReportType(answers.report_type || tz.report_type) || "cashflow",
         business_name: normalizeText(draft.businessNameResolved || tz.business_name || identity.telegram_username || "Business"),
@@ -774,20 +849,30 @@ function buildPayloadFromTzDraft(draft, message) {
             formatting: true
         }
     };
+
+    if (draft.inputClassification === "minimal_cashflow_tz") {
+        payload.build_mode = "minimal";
+    }
+
+    return payload;
 }
 
 function inferSheetsFromPayload(payload) {
     const sheets = [];
     if (payload.report_type === "cashflow") {
-        sheets.push("Cashflow", "Надходження", "Витрати", "Довідники", "Налаштування", "References");
+        if (payload.build_mode === "minimal") {
+            sheets.push("Cashflow", "Надходження", "Витрати", "Довідники", "Інструкція");
+        } else {
+            sheets.push("Cashflow", "Надходження", "Витрати", "Довідники", "Налаштування", "References", "Інструкція");
+        }
     } else if (payload.report_type === "cashflow_and_pl") {
-        sheets.push("Cashflow", "Надходження", "Витрати", "P&L", "Доходи", "Прямі витрати", "Операційні витрати", "Довідники", "Налаштування", "References");
+        sheets.push("Cashflow", "Надходження", "Витрати", "P&L", "Доходи", "Прямі витрати", "Операційні витрати", "Довідники", "Налаштування", "References", "Інструкція");
     } else if (payload.report_type === "pl") {
-        sheets.push("P&L", "Доходи", "Прямі витрати", "Операційні витрати", "Довідники", "Налаштування", "References");
+        sheets.push("P&L", "Доходи", "Прямі витрати", "Операційні витрати", "Довідники", "Налаштування", "References", "Інструкція");
     } else if (payload.report_type === "balance") {
-        sheets.push("Баланс", "Довідники", "Налаштування", "References");
+        sheets.push("Баланс", "Довідники", "Налаштування", "References", "Інструкція");
     } else {
-        sheets.push("Dashboard", "References");
+        sheets.push("Dashboard", "References", "Інструкція");
     }
     if (payload.options?.payment_calendar) sheets.push("Платіжний календар");
 
@@ -1615,6 +1700,7 @@ async function handleTzCapture(message, draft) {
             analysis: analyzeArchitecture(readyTz),
             businessNameResolved,
             inputMode,
+            inputClassification: draft.inputClassification || null,
             resolvedAnswers,
             skippedKeys,
             answers: {},
@@ -1649,6 +1735,7 @@ async function handleTzCapture(message, draft) {
         analysis,
         businessNameResolved,
         inputMode,
+        inputClassification: draft.inputClassification || null,
         resolvedAnswers,
         skippedKeys,
         questionQueue: aiBundle.questions,
@@ -1990,7 +2077,8 @@ async function handleTelegramUpdate(update) {
         return { handled: true, reason: "duplicate_update" };
     }
 
-    const message = extractMessage(update);
+    const rawMessage = extractMessage(update);
+    const message = rawMessage ? await hydrateMessageTextFromDocument(rawMessage) : rawMessage;
     if (!message || !message.chat) return { handled: false, reason: "No message context" };
 
     const chatId = getChatId(message);
@@ -2003,7 +2091,9 @@ async function handleTelegramUpdate(update) {
         const draft = getDraft(chatId);
         const inputKind = classifyInput(text, {
             stage: draft.stage,
-            questionQueue: draft.questionQueue || draft.questionsQueue || []
+            questionQueue: draft.questionQueue || draft.questionsQueue || [],
+            reportType: draft.report_type,
+            fileName: message.document?.file_name || ""
         });
 
         if (draft.stage === STAGES.BUILDING && command === "/retry") {
@@ -2106,7 +2196,8 @@ async function handleTelegramUpdate(update) {
         if (draft.stage === STAGES.EDITING && shouldStartNewBuildFromMessage(message, draft)) {
             return handleTzCapture(message, {
                 ...draft,
-                stage: STAGES.IDLE
+                stage: STAGES.IDLE,
+                inputClassification: inputKind
             });
         }
 
@@ -2122,7 +2213,10 @@ async function handleTelegramUpdate(update) {
             });
         }
 
-        return handleTzCapture(message, draft);
+        return handleTzCapture(message, {
+            ...draft,
+            inputClassification: inputKind
+        });
     });
 }
 
