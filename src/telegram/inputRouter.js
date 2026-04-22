@@ -65,6 +65,16 @@ function isMinimalCashflowTz(text, state = {}) {
     return true;
 }
 
+function isPaymentCalendarCashflowTz(text, state = {}) {
+    const source = String(text || "");
+    const reportType = resolveReportType(source, state);
+    const hasCashflowContext = reportType === "cashflow" || normalizeText(state.fileName || state.file_name).toLowerCase() === "cashflow_articles.md";
+
+    if (!hasCashflowContext) return false;
+    if (!isArticleOnlyCashflowSource(source, state)) return false;
+    return /(платіжний\s*календар|payment\s*calendar)/i.test(source);
+}
+
 function looksLikeStructuredTz(text) {
     const source = String(text || "");
     if (!source.trim()) return false;
@@ -84,6 +94,10 @@ function classifyInput(text, state = {}) {
         return "clarification_answer";
     }
 
+    if (isPaymentCalendarCashflowTz(source, state)) {
+        return "payment_calendar_cashflow_tz";
+    }
+
     if (isMinimalCashflowTz(source, state)) {
         return "minimal_cashflow_tz";
     }
@@ -98,5 +112,6 @@ function classifyInput(text, state = {}) {
 module.exports = {
     classifyInput,
     looksLikeStructuredTz,
-    isMinimalCashflowTz
+    isMinimalCashflowTz,
+    isPaymentCalendarCashflowTz
 };

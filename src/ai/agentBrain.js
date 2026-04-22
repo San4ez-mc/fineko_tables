@@ -473,6 +473,80 @@ async function runPayloadSelfCheck(payload) {
     };
 }
 
+function normalizeCalendarRule(rule = {}) {
+    const name = String(rule.name || rule.article || "").trim();
+    const typicalDay = Number(rule.typical_day);
+    return {
+        name,
+        typical_day: Number.isInteger(typicalDay) && typicalDay >= 1 && typicalDay <= 31 ? typicalDay : null
+    };
+}
+
+function deterministicParsePaymentCalendarFixedCosts(answer, outflows = []) {
+    const source = String(answer || "").trim();
+    if (!source || /^(пропустити|skip|unknown|не знаю)$/i.test(source)) {
+        return [];
+    }
+
+    const knownOutflows = (Array.isArray(outflows) ? outflows : [])
+        .map((item) => String(item?.article || item?.name || item || "").trim())
+        .filter(Boolean);
+
+    const chunks = source
+        .split(/[\n;,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+    const rules = [];
+    chunks.forEach((chunk) => {
+        const match = chunk.match(/(\d{1,2})\s*(?:-?го)?\s*$/i);
+        if (!match) return;
+
+        const rawName = String(chunk.slice(0, match.index || 0) || "")
+            .replace(/[\s—:.-]+$/g, "")
+            .trim()
+            .toLowerCase();
+        const typicalDay = Number(match[1]);
+        if (!Number.isInteger(typicalDay) || typicalDay < 1 || typicalDay > 31) return;
+        if (!rawName) return;
+
+        const resolvedName = knownOutflows.find((name) => {
+            const normalizedName = name.toLowerCase();
+            return normalizedName.includes(rawName) || rawName.includes(normalizedName);
+        }) || String(chunk.slice(0, match.index || 0) || "").replace(/[\s—:.-]+$/g, "").trim();
+
+        rules.push({ name: resolvedName, typical_day: typicalDay });
+    });
+
+    return rules.map(normalizeCalendarRule).filter((item) => item.name && item.typical_day);
+}
+
+async function parsePaymentCalendarFixedCosts(answer, outflows = []) {
+    const fallback = deterministicParsePaymentCalendarFixedCosts(answer, outflows);
+    if (!isEnabled()) {
+        return fallback;
+    }
+
+    const systemPrompt = [
+        "You map a user's Ukrainian answer about fixed monthly expense dates to known outflow article names for a payment calendar.",
+        "Return only JSON.",
+        "Use only outflow names from the provided list.",
+        "If the user says to skip or does not know, return an empty array.",
+        "typical_day must be an integer from 1 to 31."
+    ].join(" ");
+
+    const userPrompt = `Known outflows:\n${JSON.stringify((Array.isArray(outflows) ? outflows : []).map((item) => String(item?.article || item?.name || item || "").trim()).filter(Boolean), null, 2)}\n\nUser answer:\n${String(answer || "")}\n\nReturn JSON:\n{\n  "fixed_costs": [{"name":"...","typical_day":10}]\n}`;
+
+    try {
+        const data = await callJsonTask({ systemPrompt, userPrompt });
+        return Array.isArray(data.fixed_costs)
+            ? data.fixed_costs.map(normalizeCalendarRule).filter((item) => item.name && item.typical_day)
+            : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
 module.exports = {
     isEnabled,
     getConfigSummary,
@@ -485,5 +559,6 @@ module.exports = {
     generateTzFromFreeText,
     generateBusinessNameFromText,
     generateCustomTableBlueprint,
-    runPayloadSelfCheck
+    runPayloadSelfCheck,
+    parsePaymentCalendarFixedCosts
 };

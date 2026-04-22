@@ -740,9 +740,9 @@ function buildCashflow_(ctx) {
     });
   }
 
-  if (!isMinimalBuild && options.payment_calendar) {
+  if (options.payment_calendar) {
     var calendar = ensureSheet_(ss, '📅 Платіжний календар');
-    setupPaymentCalendar_(calendar);
+    setupPaymentCalendar_(calendar, payload);
     ctx.sheetsBuilt.push('📅 Платіжний календар');
   }
 
@@ -780,11 +780,11 @@ function buildCashflow_(ctx) {
     }
   });
 
-  ['📊 Cashflow', '📋 Довідники', '⚙️ Налаштування', '🔗 References', '📖 Інструкція'].forEach(function(name) {
+  ['📊 Cashflow', '📋 Довідники', '⚙️ Налаштування', '🔗 References', '📖 Інструкція', '📅 Платіжний календар'].forEach(function(name) {
     var sh = ss.getSheetByName(name);
     if (sh) {
       autoResizeAllColumns(sh);
-      trimSheet(sh, Math.max(sh.getLastRow() + 5, 20), Math.max(sh.getLastColumn() + 1, 6));
+      trimSheet(sh, Math.max(sh.getLastRow() + 5, name === '📅 Платіжний календар' ? 30 : 20), Math.max(sh.getLastColumn() + 1, 6));
     }
   });
 
@@ -1176,26 +1176,194 @@ function setupPersonalExpenseSheet_(sheet) {
   protectHeader_(sheet);
 }
 
-function setupPaymentCalendar_(sheet) {
-  sheet.clear();
-  sheet.getRange(1, 1, 1, 4).setValues([['Дата', 'Надходження план', 'Виплати план', 'Залишок']]);
-  sheet.setFrozenRows(1);
-  sheet.getRange('A:A').setNumberFormat('dd.mm.yyyy');
+function buildCalendarWeekRows_() {
+  return [
+    ['Тиждень 1', '1-7'],
+    ['Тиждень 2', '8-14'],
+    ['Тиждень 3', '15-21'],
+    ['Тиждень 4', '22-28'],
+    ['Тиждень 5', '29-31']
+  ];
+}
 
-  for (var row = 2; row <= 40; row++) {
-    if (row === 2) {
-      sheet.getRange(row, 4).setFormula('=\'' + SETTINGS_SHEET_NAME + '\'!B4+B2-C2');
+function protectRange_(range, description) {
+  var protection = range.protect();
+  protection.setDescription(description || 'Protected range');
+  protection.setWarningOnly(false);
+  var me = Session.getEffectiveUser();
+  protection.addEditor(me);
+  var editors = protection.getEditors();
+  for (var i = 0; i < editors.length; i++) {
+    if (editors[i].getEmail() !== me.getEmail()) {
+      protection.removeEditor(editors[i]);
+    }
+  }
+}
+
+function setPaymentCalendarHeaderNotes_(sheet, payload, outflowStartCol) {
+  var outflows = Array.isArray(payload && payload.outflows) ? payload.outflows : [];
+  outflows.forEach(function(item, index) {
+    if (!item || !item.is_fixed || !item.typical_day) return;
+    sheet.getRange(13, outflowStartCol + index).setNote('Фіксований платіж, типовий день місяця: ' + item.typical_day);
+  });
+}
+
+function applyPaymentCalendarConditionalFormatting_(sheet, balanceCol, startRow, endRow, openingBalanceA1) {
+  var letter = columnToLetter_(balanceCol);
+  var range = sheet.getRange(startRow, balanceCol, endRow - startRow + 1, 1);
+  var rules = [
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=$' + letter + startRow + '<0')
+      .setBackground(THEME.WARN_BG)
+      .setFontColor(THEME.WARN_TEXT)
+      .setRanges([range])
+      .build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=AND($' + letter + startRow + '>=0,$' + letter + startRow + '<=0.2*' + openingBalanceA1 + ')')
+      .setBackground('#FFF9C4')
+      .setFontColor('#7A5C00')
+      .setRanges([range])
+      .build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=$' + letter + startRow + '>0.2*' + openingBalanceA1)
+      .setBackground('#E6F4EC')
+      .setFontColor('#0E7C3A')
+      .setRanges([range])
+      .build()
+  ];
+  sheet.setConditionalFormatRules(rules);
+}
+
+function setPaymentCalendarTestData_(sheet, inflowStartCol, inflowCount, outflowStartCol, outflowCount, weekStartRow) {
+  var highlightCells = [];
+  sheet.getRange('B8').setValue(50000);
+  sheet.getRange('B9').setValue('Поточний місяць');
+  highlightCells.push(sheet.getRange('B8'));
+  highlightCells.push(sheet.getRange('B9'));
+
+  if (inflowCount > 0) {
+    sheet.getRange(weekStartRow, inflowStartCol).setValue(30000);
+    sheet.getRange(weekStartRow + 1, inflowStartCol).setValue(45000);
+    highlightCells.push(sheet.getRange(weekStartRow, inflowStartCol));
+    highlightCells.push(sheet.getRange(weekStartRow + 1, inflowStartCol));
+  }
+
+  if (outflowCount > 0) {
+    sheet.getRange(weekStartRow, outflowStartCol).setValue(15000);
+    highlightCells.push(sheet.getRange(weekStartRow, outflowStartCol));
+  }
+
+  highlightCells.forEach(function(cell) {
+    cell.setBackground('#FFF9C4').setNote('Тестове значення — видали перед початком роботи');
+  });
+}
+
+function setupPaymentCalendar_(sheet, payload) {
+  var ss = sheet.getParent();
+  var inflows = Array.isArray(payload && payload.articles && payload.articles.inflows) ? payload.articles.inflows : [];
+  var outflows = Array.isArray(payload && payload.outflows) ? payload.outflows : [];
+  if (!outflows.length && Array.isArray(payload && payload.articles && payload.articles.outflows)) {
+    outflows = payload.articles.outflows.map(function(name) {
+      return { name: name, is_fixed: false, typical_day: null };
+    });
+  }
+
+  var weekRows = buildCalendarWeekRows_();
+  var openingBalanceRow = 8;
+  var calendarMonthRow = 9;
+  var warningRow = 10;
+  var headerRow = 13;
+  var dataStartRow = 14;
+  var summaryRow = dataStartRow + weekRows.length;
+  var inflowStartCol = 3;
+  var inflowTotalCol = inflowStartCol + inflows.length;
+  var outflowStartCol = inflowTotalCol + 1;
+  var outflowTotalCol = outflowStartCol + outflows.length;
+  var balanceCol = outflowTotalCol + 1;
+  var openingBalanceA1 = 'B' + openingBalanceRow;
+  var warningA1 = 'B' + warningRow;
+
+  sheet.clear();
+  sheet.getRange('A1').setValue('📅 ПЛАТІЖНИЙ КАЛЕНДАР')
+    .setFontSize(16)
+    .setFontWeight('bold')
+    .setBackground('#1A56DB')
+    .setFontColor('#FFFFFF');
+  sheet.getRange(3, 1, 6, 1).setValues([
+    ['Як користуватись:'],
+    ['1. Введи поточний залишок на рахунку в комірку "Залишок на рахунку зараз"'],
+    ['2. Введи місяць прогнозу'],
+    ['3. По кожному тижню введи очікувані надходження і заплановані витрати'],
+    ['4. Дивись на колір залишку — червоний означає ризик касового розриву'],
+    ['Жовті комірки — тестові дані, видали їх перед початком роботи.']
+  ]);
+
+  sheet.getRange('A8:B10').setValues([
+    ['Залишок на рахунку зараз', 0],
+    ['Місяць прогнозу', ''],
+    ['Попередження про розрив', '']
+  ]);
+  sheet.getRange(warningA1).setFormula('=IF(MIN(' + columnToLetter_(balanceCol) + dataStartRow + ':' + columnToLetter_(balanceCol) + (summaryRow - 1) + ')<0,"⚠️ Є ризик касового розриву","✅ Розривів не виявлено")');
+
+  createNamedRange(ss, sheet, 'CALENDAR_OPENING_BALANCE', openingBalanceRow, 2, 1);
+  createNamedRange(ss, sheet, 'CALENDAR_MONTH', calendarMonthRow, 2, 1);
+
+  var headers = [['Тиждень', 'Дати']
+    .concat(inflows)
+    .concat(['Разом надходжень'])
+    .concat(outflows.map(function(item) { return item && item.name ? item.name : ''; }))
+    .concat(['Разом витрат', 'Залишок на кінець тижня'])];
+  sheet.getRange(headerRow, 1, 1, headers[0].length).setValues(headers);
+  sheet.getRange(dataStartRow, 1, weekRows.length, 2).setValues(weekRows);
+
+  for (var row = dataStartRow; row < summaryRow; row++) {
+    if (inflows.length > 0) {
+      sheet.getRange(row, inflowTotalCol).setFormula('=SUM(' + columnToLetter_(inflowStartCol) + row + ':' + columnToLetter_(inflowTotalCol - 1) + row + ')');
     } else {
-      sheet.getRange(row, 4).setFormula('=D' + (row - 1) + '+B' + row + '-C' + row);
+      sheet.getRange(row, inflowTotalCol).setValue(0);
+    }
+
+    if (outflows.length > 0) {
+      sheet.getRange(row, outflowTotalCol).setFormula('=SUM(' + columnToLetter_(outflowStartCol) + row + ':' + columnToLetter_(outflowTotalCol - 1) + row + ')');
+    } else {
+      sheet.getRange(row, outflowTotalCol).setValue(0);
+    }
+
+    if (row === dataStartRow) {
+      sheet.getRange(row, balanceCol).setFormula('=' + openingBalanceA1 + '+' + columnToLetter_(inflowTotalCol) + row + '-' + columnToLetter_(outflowTotalCol) + row);
+    } else {
+      sheet.getRange(row, balanceCol).setFormula('=' + columnToLetter_(balanceCol) + (row - 1) + '+' + columnToLetter_(inflowTotalCol) + row + '-' + columnToLetter_(outflowTotalCol) + row);
     }
   }
 
-  var rule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied('=$D2<\'' + SETTINGS_SHEET_NAME + '\'!B5')
-    .setBackground('#FEF2F2')
-    .setRanges([sheet.getRange('A2:D1000')])
-    .build();
-  sheet.setConditionalFormatRules([rule]);
+  sheet.getRange(summaryRow, 1, 1, 2).setValues([['Підсумок місяця', '']]);
+  for (var inflowCol = inflowStartCol; inflowCol < inflowTotalCol; inflowCol++) {
+    sheet.getRange(summaryRow, inflowCol).setFormula('=SUM(' + columnToLetter_(inflowCol) + dataStartRow + ':' + columnToLetter_(inflowCol) + (summaryRow - 1) + ')');
+  }
+  sheet.getRange(summaryRow, inflowTotalCol).setFormula('=SUM(' + columnToLetter_(inflowTotalCol) + dataStartRow + ':' + columnToLetter_(inflowTotalCol) + (summaryRow - 1) + ')');
+  for (var outflowCol = outflowStartCol; outflowCol < outflowTotalCol; outflowCol++) {
+    sheet.getRange(summaryRow, outflowCol).setFormula('=SUM(' + columnToLetter_(outflowCol) + dataStartRow + ':' + columnToLetter_(outflowCol) + (summaryRow - 1) + ')');
+  }
+  sheet.getRange(summaryRow, outflowTotalCol).setFormula('=SUM(' + columnToLetter_(outflowTotalCol) + dataStartRow + ':' + columnToLetter_(outflowTotalCol) + (summaryRow - 1) + ')');
+  sheet.getRange(summaryRow, balanceCol).setFormula('=' + columnToLetter_(balanceCol) + (summaryRow - 1));
+
+  sheet.setFrozenRows(headerRow);
+  sheet.getRange('B8').setNumberFormat('# ##0.00');
+  sheet.getRange(dataStartRow, inflowStartCol, summaryRow - dataStartRow + 1, Math.max(balanceCol - inflowStartCol + 1, 1)).setNumberFormat('# ##0.00');
+  applySheetBanding_(sheet, INPUT_THEME, summaryRow, balanceCol);
+  sheet.getRange(headerRow, 1, 1, balanceCol).setBackground(THEME.HEADER_BG).setFontColor(THEME.HEADER_TEXT).setFontWeight('bold');
+  sheet.getRange(summaryRow, 1, 1, balanceCol).setBackground(THEME.TOTAL_BG).setFontColor(THEME.TOTAL_TEXT).setFontWeight('bold');
+  sheet.getRange(warningA1).setFontWeight('bold');
+  setPaymentCalendarHeaderNotes_(sheet, payload, outflowStartCol);
+  setPaymentCalendarTestData_(sheet, inflowStartCol, inflows.length, outflowStartCol, outflows.length, dataStartRow);
+  applyPaymentCalendarConditionalFormatting_(sheet, balanceCol, dataStartRow, summaryRow - 1, '$' + openingBalanceA1);
+
+  protectHeader_(sheet);
+  protectRange_(sheet.getRange(warningA1), 'Попередження календаря');
+  protectRange_(sheet.getRange(dataStartRow, inflowTotalCol, weekRows.length, 1), 'Разом надходжень');
+  protectRange_(sheet.getRange(dataStartRow, outflowTotalCol, weekRows.length, 1), 'Разом витрат');
+  protectRange_(sheet.getRange(dataStartRow, balanceCol, weekRows.length, 1), 'Залишок на кінець тижня');
+  protectRange_(sheet.getRange(summaryRow, 1, 1, balanceCol), 'Підсумок місяця');
 }
 
 function setupLogSheet_(sheet) {
@@ -1382,6 +1550,7 @@ function createFormsForResponsible_(payload, spreadsheetId) {
 
 function validateBuiltFile(spreadsheet, payload) {
   var errors = [];
+  var warnings = [];
   var reportType = String(payload.report_type || '').toLowerCase();
   var names = spreadsheet.getSheets().map(function(s) { return s.getName(); });
 
@@ -1426,7 +1595,42 @@ function validateBuiltFile(spreadsheet, payload) {
     }
   }
 
-  return { valid: errors.length === 0, errors: errors };
+  if ((payload.payment_calendar || (payload.options && payload.options.payment_calendar)) && reportType === 'cashflow') {
+    var calendarSheet = spreadsheet.getSheetByName('📅 Платіжний календар');
+    if (!calendarSheet) {
+      errors.push('Відсутній аркуш: 📅 Платіжний календар');
+    } else {
+      ['CALENDAR_OPENING_BALANCE', 'CALENDAR_MONTH'].forEach(function(name) {
+        if (namedRanges.indexOf(name) === -1) {
+          errors.push('Відсутній named range: ' + name);
+        }
+      });
+
+      var expectedColumns = (Array.isArray(payload.articles && payload.articles.inflows) ? payload.articles.inflows.length : 0)
+        + (Array.isArray(payload.articles && payload.articles.outflows) ? payload.articles.outflows.length : 0)
+        + 5;
+      if (calendarSheet.getLastColumn() !== expectedColumns) {
+        errors.push('📅 Платіжний календар має неочікувану кількість колонок');
+      }
+
+      var balanceCol = expectedColumns;
+      var firstBalance = String(calendarSheet.getRange(14, balanceCol).getDisplayValue() || '');
+      if (/^#REF!|^#VALUE!/i.test(firstBalance)) {
+        errors.push('Зламано формулу першого тижня у 📅 Платіжний календар');
+      }
+
+      var warningValue = String(calendarSheet.getRange('B10').getDisplayValue() || '');
+      if (!warningValue || /^#REF!|^#VALUE!/i.test(warningValue)) {
+        errors.push('Зламано попередження про розрив у 📅 Платіжний календар');
+      }
+
+      if (String(calendarSheet.getRange('B8').getDisplayValue() || '') === '') {
+        warnings.push('У 📅 Платіжний календар не заповнений відкриваючий баланс');
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors: errors, warnings: warnings };
 }
 
 function setPermissions(folder, file, userEmail, shareMode) {
@@ -1614,7 +1818,11 @@ function removeSheet_(ss, change) {
 function getRequiredSheets_(payload, reportType) {
   if (reportType === 'cashflow') {
     if (payload.build_mode === 'minimal') {
-      return ['📊 Cashflow', '⬇️ Надходження', '⬆️ Витрати', '📋 Довідники', '📖 Інструкція'];
+      var minimalList = ['📊 Cashflow', '⬇️ Надходження', '⬆️ Витрати', '📋 Довідники', '📖 Інструкція'];
+      if (payload.payment_calendar || (payload.options && payload.options.payment_calendar)) {
+        minimalList.push('📅 Платіжний календар');
+      }
+      return minimalList;
     }
 
     var list = ['📊 Cashflow', '⬇️ Надходження', '⬆️ Витрати', '📋 Довідники', '⚙️ Налаштування', '🔗 References'];

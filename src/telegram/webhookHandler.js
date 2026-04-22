@@ -14,7 +14,8 @@ const {
     parseFreeText,
     generateBusinessNameFromText,
     generateCustomTableBlueprint,
-    runPayloadSelfCheck
+    runPayloadSelfCheck,
+    parsePaymentCalendarFixedCosts
 } = require("../ai/agentBrain");
 
 const DRAFTS = new Map();
@@ -710,6 +711,10 @@ function findNoAccessItemsWithoutMode(tz) {
         .filter((item) => !normalizeText(item.input_mode));
 }
 
+function isPaymentCalendarRequestedTz(tz) {
+    return Boolean(tz?._payment_calendar_requested);
+}
+
 function buildQuestionQueue(tz, _analysis, resolvedAnswers = {}, skippedKeys = [], questionsCount = 0) {
     const questions = [];
 
@@ -734,6 +739,16 @@ function buildQuestionQueue(tz, _analysis, resolvedAnswers = {}, skippedKeys = [
         });
     }
 
+    if (isPaymentCalendarRequestedTz(tz)
+        && Array.isArray(tz?.outflows)
+        && tz.outflows.length > 0
+        && resolvedAnswers.payment_calendar_fixed_rules === undefined) {
+        questions.push({
+            key: "payment_calendar_fixed_rules",
+            text: "По яких статтях витрат є фіксована дата платежу щомісяця? Наприклад: зарплата — 10-го, оренда — 1-го, податки — 20-го. Напиши у форматі: назва статті — число місяця. Або напиши \"пропустити\" якщо поки невідомо."
+        });
+    }
+
     questions.push(...buildActiveQueue(tz, resolvedAnswers, skippedKeys));
 
     if (isPlLikeReportType(tz.report_type) && resolvedAnswers.pl_project_tracking === undefined) {
@@ -753,6 +768,26 @@ function buildQuestionQueue(tz, _analysis, resolvedAnswers = {}, skippedKeys = [
 
     const budgetLeft = Math.max(0, MAX_TOTAL_QUESTIONS - Number(questionsCount || 0));
     return questions.slice(0, budgetLeft);
+}
+
+function normalizeCalendarRules(rules = []) {
+    return (Array.isArray(rules) ? rules : [])
+        .map((item) => ({
+            name: normalizeText(item?.name || item?.article),
+            typical_day: Number(item?.typical_day)
+        }))
+        .filter((item) => item.name && Number.isInteger(item.typical_day) && item.typical_day >= 1 && item.typical_day <= 31);
+}
+
+async function resolvePaymentCalendarRules(chatId, draft, answerText) {
+    const outflows = Array.isArray(draft?.extracted?.outflows) ? draft.extracted.outflows : [];
+
+    try {
+        return normalizeCalendarRules(await parsePaymentCalendarFixedCosts(answerText, outflows));
+    } catch (error) {
+        disableAiForChat(chatId, draft, error?.message);
+        return [];
+    }
 }
 
 function buildResponsibleMap(tz, answers = {}) {
@@ -803,6 +838,7 @@ function buildPayloadFromTzDraft(draft, message) {
     const articleDetails = {
         inflows: (Array.isArray(tz.inflows) ? tz.inflows : []).map((item) => ({
             article: normalizeText(item.article || item.name),
+            name: normalizeText(item.article || item.name),
             responsible: normalizeText(item.responsible || item.owner || "Owner"),
             ops_per_month: Number(item.ops_per_month) || 0,
             has_sheets_access: item.has_sheets_access !== false,
@@ -810,11 +846,14 @@ function buildPayloadFromTzDraft(draft, message) {
         })).filter((item) => item.article),
         outflows: (Array.isArray(tz.outflows) ? tz.outflows : []).map((item) => ({
             article: normalizeText(item.article || item.name),
+            name: normalizeText(item.article || item.name),
             responsible: normalizeText(item.responsible || item.owner || "Owner"),
             ops_per_month: Number(item.ops_per_month) || 0,
             has_sheets_access: item.has_sheets_access !== false,
             cost_type: normalizeCostTypeAnswer(item.cost_type) || normalizeText(item.cost_type) || null,
-            recognition_moment: normalizeRecognitionMomentAnswer(item.recognition_moment) || normalizeText(item.recognition_moment) || null
+            recognition_moment: normalizeRecognitionMomentAnswer(item.recognition_moment) || normalizeText(item.recognition_moment) || null,
+            is_fixed: item.is_fixed === true,
+            typical_day: Number.isInteger(Number(item.typical_day)) ? Number(item.typical_day) : null
         })).filter((item) => item.article)
     };
     const projectTracking = /^(так|yes|y|true|по\s*проєктах|з\s*проєктами)$/i.test(normalizeText(answers.pl_project_tracking));
@@ -822,6 +861,8 @@ function buildPayloadFromTzDraft(draft, message) {
         .split(/[;,]/)
         .map((item) => normalizeText(item))
         .filter(Boolean);
+    const paymentCalendarRequested = isPaymentCalendarRequestedTz(tz) || draft.inputClassification === "payment_calendar_cashflow_tz";
+    const minimalBuildRequested = draft.inputClassification === "minimal_cashflow_tz" || draft.inputClassification === "payment_calendar_cashflow_tz";
 
     const payload = {
         action: "build_table",
@@ -836,21 +877,28 @@ function buildPayloadFromTzDraft(draft, message) {
             outflows: draft.analysis?.outflowsMode || "A"
         },
         articles: { inflows, outflows },
+        inflows: articleDetails.inflows.map((item) => ({ name: item.name })),
+        outflows: articleDetails.outflows.map((item) => ({
+            name: item.name,
+            is_fixed: item.is_fixed === true,
+            typical_day: item.typical_day
+        })),
         article_details: articleDetails,
         responsible: buildResponsibleMap(tz, answers),
         pl_settings: {
             project_tracking: projectTracking,
             projects
         },
+        payment_calendar: paymentCalendarRequested,
         options: {
-            payment_calendar: false,
+            payment_calendar: paymentCalendarRequested,
             multi_account: false,
             counterparty_tracking: false,
             formatting: true
         }
     };
 
-    if (draft.inputClassification === "minimal_cashflow_tz") {
+    if (minimalBuildRequested) {
         payload.build_mode = "minimal";
     }
 
@@ -985,7 +1033,10 @@ function formatAppsScriptResult(result, payload, draft) {
     const files = Array.isArray(result.files) ? result.files : [];
     const forms = Array.isArray(result.forms) ? result.forms : [];
     const firstFile = files[0] || {};
-    const lines = [sectionTitle("✅", "Таблиця готова"), ""];
+    const title = payload.options?.payment_calendar
+        ? sectionTitle("📅", "Платіжний календар готовий")
+        : sectionTitle("✅", "Таблиця готова");
+    const lines = [title, ""];
 
     if (firstFile.name) lines.push(`📊 ${firstFile.name}`);
     if (firstFile.url) lines.push(`🔗 ${firstFile.url}`);
@@ -1008,9 +1059,17 @@ function formatAppsScriptResult(result, payload, draft) {
     }
 
     lines.push("", sectionTitle("🚀", "Перші кроки"));
-    lines.push("1. Відкрий таблицю і перевір аркуш «Інструкція»");
-    lines.push("2. Видали жовті тестові рядки перед реальним використанням");
-    if (payload.options?.counterparty_tracking) lines.push("3. Перевір дропдаун контрагентів");
+    if (payload.options?.payment_calendar) {
+        lines.push("1. Відкрий аркуш «📅 Платіжний календар»");
+        lines.push("2. Введи поточний залишок на рахунку");
+        lines.push("3. По кожному тижню внеси очікувані надходження і платежі");
+        lines.push("4. Видали жовті тестові значення перед початком роботи");
+        lines.push("", "Якщо залишок стає червоним, у тебе є час заздалегідь виправити касовий розрив.");
+    } else {
+        lines.push("1. Відкрий таблицю і перевір аркуш «Інструкція»");
+        lines.push("2. Видали жовті тестові рядки перед реальним використанням");
+        if (payload.options?.counterparty_tracking) lines.push("3. Перевір дропдаун контрагентів");
+    }
     lines.push("", "Якщо треба щось змінити, просто напиши.");
 
     return lines.join("\n");
@@ -1483,7 +1542,7 @@ async function resolveBusinessName(tz, rawText, message, draft, chatId) {
     return normalizeText(message?.from?.username || "Business");
 }
 
-function applyCriticalAnswerSideEffects(draft, updatedAnswers) {
+function applyCriticalAnswerSideEffects(draft, updatedAnswers, paymentCalendarRules = []) {
     const extracted = { ...(draft.extracted || {}) };
     const answers = updatedAnswers || {};
 
@@ -1526,12 +1585,28 @@ function applyCriticalAnswerSideEffects(draft, updatedAnswers) {
         }
     });
 
+    if (isPaymentCalendarRequestedTz(extracted)) {
+        const ruleMap = new Map(normalizeCalendarRules(paymentCalendarRules).map((item) => [item.name.toLowerCase(), item]));
+        extracted.outflows = (Array.isArray(extracted.outflows) ? extracted.outflows : []).map((item) => {
+            const articleName = normalizeText(item.article || item.name);
+            const matchedRule = ruleMap.get(articleName.toLowerCase());
+            return {
+                ...item,
+                is_fixed: Boolean(matchedRule),
+                typical_day: matchedRule ? matchedRule.typical_day : null
+            };
+        });
+    }
+
     return extracted;
 }
 
 function ensureBuildMinimum(tz) {
     const next = { ...(tz || {}) };
     if (!normalizeReportType(next.report_type)) {
+        next.report_type = "cashflow";
+    }
+    if (isPaymentCalendarRequestedTz(next)) {
         next.report_type = "cashflow";
     }
     if (next._requires_article_confirmation && next._articles_confirmed !== true) {
@@ -1543,6 +1618,14 @@ function ensureBuildMinimum(tz) {
     if (inflows.length + outflows.length === 0) {
         next.inflows = [{ article: "Оплата від клієнтів", responsible: "Owner", ops_per_month: 10, has_sheets_access: true }];
         next.outflows = [{ article: "Інші витрати", responsible: "Owner", ops_per_month: 10, has_sheets_access: true }];
+    }
+
+    if (isPaymentCalendarRequestedTz(next)) {
+        next.outflows = (Array.isArray(next.outflows) ? next.outflows : []).map((item) => ({
+            ...item,
+            is_fixed: item.is_fixed === true,
+            typical_day: Number.isInteger(Number(item.typical_day)) ? Number(item.typical_day) : null
+        }));
     }
 
     return next;
@@ -1671,6 +1754,10 @@ async function handleTzCapture(message, draft) {
         inflows: [{ article: "Оплата від клієнтів", responsible: "Owner", ops_per_month: 20, has_sheets_access: true }],
         outflows: [{ article: "Операційні витрати", responsible: "Owner", ops_per_month: 20, has_sheets_access: true }]
     };
+    if (draft.inputClassification === "payment_calendar_cashflow_tz") {
+        preparedTz.report_type = "cashflow";
+        preparedTz._payment_calendar_requested = true;
+    }
     if (inputMode === "free_text") {
         preparedTz._requires_article_confirmation = true;
         preparedTz._articles_confirmed = false;
@@ -1769,9 +1856,17 @@ async function handleCollectingAnswers(message, draft) {
         return { handled: true, command: "clarification_help" };
     }
 
-    const updated = (await resolveClarificationAnswersWithAi(chatId, draft, message.text || ""))
-        || applyAnswers(draft, message.text || "");
-    const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.resolvedAnswers);
+    const firstPendingQuestion = (Array.isArray(draft.pendingQuestions) && draft.pendingQuestions.length > 0
+        ? draft.pendingQuestions[0]
+        : (Array.isArray(draft.questionQueue) ? draft.questionQueue[0] : null)) || null;
+    const updated = firstPendingQuestion?.key === "payment_calendar_fixed_rules"
+        ? applyAnswers(draft, message.text || "")
+        : ((await resolveClarificationAnswersWithAi(chatId, draft, message.text || ""))
+            || applyAnswers(draft, message.text || ""));
+    const paymentCalendarRules = updated.resolvedAnswers.payment_calendar_fixed_rules !== undefined
+        ? await resolvePaymentCalendarRules(chatId, draft, updated.resolvedAnswers.payment_calendar_fixed_rules)
+        : [];
+    const extractedAfterAnswers = applyCriticalAnswerSideEffects(draft, updated.resolvedAnswers, paymentCalendarRules);
     const rebuiltQueue = buildQuestionQueue(
         extractedAfterAnswers,
         draft.analysis,
